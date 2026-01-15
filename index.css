@@ -1253,8 +1253,13 @@ h3 {
 }
 
 @keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
 }
 
 .modal-content {
@@ -1274,6 +1279,7 @@ h3 {
     opacity: 0;
     transform: translateY(20px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);
@@ -1313,4 +1319,49 @@ h3 {
   gap: var(--space-md);
   padding: var(--space-lg);
   border-top: 1px solid var(--glass-border);
+}
+
+/* ========================================
+   Source Tabs (Transcript Version Switcher)
+   ======================================== */
+
+.source-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  margin-bottom: var(--space-md);
+  background: var(--bg-card);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+  flex-wrap: wrap;
+}
+
+.source-tabs-label {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  margin-right: var(--space-sm);
+}
+
+.source-tab {
+  padding: var(--space-xs) var(--space-md);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.source-tab:hover {
+  background: var(--glass-bg-hover);
+  border-color: var(--glass-border-hover);
+  color: var(--text-primary);
+}
+
+.source-tab.active {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: white;
 }

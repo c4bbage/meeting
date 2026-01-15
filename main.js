@@ -44,7 +44,9 @@ const state = {
   audioDevices: [],         // 可用的音频设备列表
   pageSummary: null,        // 当前页面的 AI 总结
   summaryLoading: false,    // 总结生成中
-  showApiKeyModal: false    // 显示 API Key 配置模态框
+  showApiKeyModal: false,   // 显示 API Key 配置模态框
+  currentSource: null,      // 当前显示的转录版本 (null = 默认/web_speech)
+  availableSources: []      // 可用的转录版本列表
 };
 
 // Services
@@ -524,6 +526,7 @@ function bindEvents() {
   window.showApiKeySettings = showApiKeySettings;
   window.saveApiKey = saveApiKey;
   window.closeApiKeyModal = closeApiKeyModal;
+  window.switchTranscriptSource = switchTranscriptSource;
 }
 
 /**
@@ -962,9 +965,9 @@ async function stopRecording() {
     await SpeakerDataService.save(state.currentPageId, speakerDiarizer.exportData());
   }
 
-  // If Whisper is available and enabled, re-transcribe with better accuracy
+  // If backend ASR is available and enabled, also transcribe with backend for comparison
   if (state.whisperAvailable && state.useWhisper && audioResult?.blob) {
-    console.log('Sending audio to backend ASR for re-transcription...');
+    console.log('Sending audio to backend ASR for additional transcription...');
     try {
       const result = await whisperAPI.transcribe(audioResult.blob, {
         language: 'zh',
@@ -972,25 +975,21 @@ async function stopRecording() {
       });
 
       if (result.success && result.segments?.length > 0) {
-        // Calculate text lengths for comparison
-        const existingSegments = await SegmentService.getFinalByPageId(state.currentPageId);
-        const existingTextLength = existingSegments.reduce((sum, s) => sum + (s.text?.length || 0), 0);
-        const newTextLength = result.segments.reduce((sum, s) => sum + (s.text?.length || 0), 0);
+        // Get backend engine name from result or default
+        const backendSource = result.engine || 'backend';
 
-        console.log(`Text comparison: WebSpeech=${existingTextLength} chars, Backend=${newTextLength} chars`);
+        // Delete any existing backend results (in case of re-transcription)
+        await SegmentService.deleteBySource(state.currentPageId, backendSource);
 
-        // Only replace if backend result is at least 50% as long as WebSpeech
-        // This prevents content loss when backend transcription fails partially
-        if (newTextLength >= existingTextLength * 0.5 || existingTextLength === 0) {
-          await SegmentService.deleteByPageId(state.currentPageId);
-          await SegmentService.addFromWhisper(state.currentPageId, result.segments);
-          console.log(`Backend transcription applied: ${result.segments.length} segments`);
-        } else {
-          console.warn(`Backend result too short (${newTextLength} vs ${existingTextLength}), keeping WebSpeech results`);
-        }
+        // Add backend results alongside WebSpeech (not replacing)
+        await SegmentService.addFromWhisper(state.currentPageId, result.segments, backendSource);
+
+        const webSpeechSegs = await SegmentService.getFinalByPageId(state.currentPageId, 'web_speech');
+        const backendSegs = result.segments;
+        console.log(`Multi-version saved: WebSpeech=${webSpeechSegs.length} segs, ${backendSource}=${backendSegs.length} segs`);
       }
     } catch (error) {
-      console.error('Backend transcription failed, keeping Web Speech results:', error);
+      console.error('Backend transcription failed:', error);
     }
   }
 
@@ -1192,21 +1191,60 @@ async function openPage(pageId) {
 
   state.currentPageId = pageId;
   state.currentView = 'detail';
+  state.currentSource = null;  // Reset to default
+  state.pageSummary = null;    // Clear previous summary
   renderApp();
 
-  // Load segments
-  const segments = await SegmentService.getFinalByPageId(pageId);
+  // Get available sources first
+  state.availableSources = await SegmentService.getSourcesByPageId(pageId);
 
+  // Load content with source selector
+  await loadPageContent(pageId, state.currentSource);
+
+  // Load audio player
+  loadAudioPlayer(pageId);
+}
+
+/**
+ * Load page content with specific source
+ */
+async function loadPageContent(pageId, source = null) {
   const contentEl = document.getElementById('page-content');
   if (!contentEl) return;
 
+  // Load segments (optionally filtered by source)
+  const segments = await SegmentService.getFinalByPageId(pageId, source);
+
+  // Build source tabs if multiple sources available
+  let tabsHtml = '';
+  if (state.availableSources.length > 1) {
+    const sourceLabels = {
+      'web_speech': '🌐 实时转录',
+      'backend': '🤖 后端 ASR',
+      'funasr': '🇨🇳 FunASR',
+      'whisper': '🐳 Whisper'
+    };
+
+    tabsHtml = `
+      <div class="source-tabs">
+        <span class="source-tabs-label">转录版本：</span>
+        ${state.availableSources.map(s => `
+          <button class="source-tab ${(source || 'web_speech') === s ? 'active' : ''}" 
+                  onclick="switchTranscriptSource('${s}')">
+            ${sourceLabels[s] || s}
+          </button>
+        `).join('')}
+      </div>
+    `;
+  }
+
   if (segments.length === 0) {
-    contentEl.innerHTML = `<div class="transcript-placeholder text-center"><p>暂无转录内容</p></div>`;
+    contentEl.innerHTML = tabsHtml + `<div class="transcript-placeholder text-center"><p>暂无转录内容</p></div>`;
     return;
   }
 
   // Render segments with speaker labels
-  let html = '<div class="transcript-segments">';
+  let html = tabsHtml + '<div class="transcript-segments">';
   let lastSpeaker = null;
 
   segments.forEach(seg => {
@@ -1233,10 +1271,19 @@ async function openPage(pageId) {
 
   html += '</div></div></div>'; // Close all
 
-  contentEl.innerHTML = html;
+  // Add character count info
+  const totalChars = segments.reduce((sum, s) => sum + (s.text?.length || 0), 0);
+  html += `<p class="text-muted mt-sm" style="font-size: 0.85em;">📊 ${segments.length} 段 | ${totalChars} 字</p>`;
 
-  // Load audio player
-  loadAudioPlayer(pageId);
+  contentEl.innerHTML = html;
+}
+
+/**
+ * Switch transcript source version
+ */
+async function switchTranscriptSource(source) {
+  state.currentSource = source;
+  await loadPageContent(state.currentPageId, source);
 }
 
 /**

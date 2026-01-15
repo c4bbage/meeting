@@ -199,11 +199,12 @@ export const SegmentService = {
   },
 
   /**
-   * Add multiple segments from Whisper transcription result
+   * Add multiple segments from backend ASR transcription result
    * @param {string} pageId - The page ID
-   * @param {Array} segments - Whisper segments with start/end/text/words
+   * @param {Array} segments - ASR segments with start/end/text/words
+   * @param {string} [source] - Source name: 'whisper' | 'funasr' (default: 'backend')
    */
-  async addFromWhisper(pageId, segments) {
+  async addFromWhisper(pageId, segments, source = 'backend') {
     const dbSegments = segments.map((seg, index) => ({
       id: generateUUID(),
       pageId,
@@ -216,7 +217,7 @@ export const SegmentService = {
       speakerLabel: null,
       speakerColor: null,
       words: seg.words || null,
-      source: 'whisper',
+      source: source,
       createdAt: new Date()
     }));
 
@@ -235,14 +236,46 @@ export const SegmentService = {
   },
 
   /**
-   * Get only final segments for a page
+   * Get only final segments for a page (default source or specified)
+   * @param {string} pageId - The page ID
+   * @param {string} [source] - Optional source filter: 'web_speech' | 'whisper' | 'funasr'
    */
-  async getFinalByPageId(pageId) {
-    return await db.segments
+  async getFinalByPageId(pageId, source = null) {
+    let query = db.segments
+      .where('pageId')
+      .equals(pageId)
+      .filter(seg => seg.isFinal);
+
+    if (source) {
+      query = query.filter(seg => seg.source === source);
+    }
+
+    return await query.sortBy('timestamp');
+  },
+
+  /**
+   * Get available sources for a page (e.g., ['web_speech', 'whisper'])
+   */
+  async getSourcesByPageId(pageId) {
+    const segments = await db.segments
       .where('pageId')
       .equals(pageId)
       .filter(seg => seg.isFinal)
-      .sortBy('timestamp');
+      .toArray();
+
+    const sources = [...new Set(segments.map(s => s.source).filter(Boolean))];
+    return sources;
+  },
+
+  /**
+   * Delete segments by page and source
+   */
+  async deleteBySource(pageId, source) {
+    await db.segments
+      .where('pageId')
+      .equals(pageId)
+      .filter(seg => seg.source === source)
+      .delete();
   },
 
   /**
