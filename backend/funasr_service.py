@@ -157,20 +157,46 @@ class FunASRService:
         Returns:
             Transcription result dict
         """
+        import io
+        
         # Get file extension
-        ext = os.path.splitext(filename)[1] or ".webm"
+        ext = os.path.splitext(filename)[1].lower() or ".webm"
         
-        # Write to temp file
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
-            f.write(audio_bytes)
-            temp_path = f.name
-        
+        # Convert to WAV using pydub if not already WAV
+        # This ensures FunASR can process the audio correctly
+        temp_path = None
         try:
+            if ext in ['.webm', '.mp4', '.m4a', '.ogg', '.opus']:
+                try:
+                    from pydub import AudioSegment
+                    
+                    # Load audio from bytes
+                    audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=ext[1:])
+                    
+                    # Export to WAV
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                        audio.export(f.name, format="wav")
+                        temp_path = f.name
+                    
+                    print(f"Converted {ext} to WAV for FunASR processing")
+                except Exception as e:
+                    print(f"Audio conversion failed: {e}, trying direct processing")
+                    # Fallback: try direct processing
+                    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+                        f.write(audio_bytes)
+                        temp_path = f.name
+            else:
+                # For WAV and other formats, use directly
+                with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+                    f.write(audio_bytes)
+                    temp_path = f.name
+            
             result = self.transcribe(temp_path, **kwargs)
             return result
         finally:
             # Cleanup temp file
-            os.unlink(temp_path)
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
 
 
 # Singleton instance

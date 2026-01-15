@@ -8,6 +8,7 @@ import { SpeechRecognitionService } from './services/SpeechRecognition.js';
 import { AudioRecorderService } from './services/AudioRecorder.js';
 import { SpeakerDiarizerService } from './services/SpeakerDiarizer.js';
 import { getWhisperAPI } from './services/WhisperAPI.js';
+import { getGeminiService, ConfigManager } from './services/GeminiService.js';
 import {
   formatDuration,
   formatDateTime,
@@ -40,7 +41,10 @@ const state = {
   recognitionActive: false, // 语音识别是否正在工作
   lastRecognitionTime: 0,   // 上次收到识别结果的时间
   selectedDeviceId: null,   // 当前选中的麦克风ID
-  audioDevices: []          // 可用的音频设备列表
+  audioDevices: [],         // 可用的音频设备列表
+  pageSummary: null,        // 当前页面的 AI 总结
+  summaryLoading: false,    // 总结生成中
+  showApiKeyModal: false    // 显示 API Key 配置模态框
 };
 
 // Services
@@ -269,7 +273,7 @@ function renderRecordingView() {
   const volumeBars = renderVolumeBars(state.currentVolume);
 
   // Generate device options
-  const deviceOptions = state.audioDevices.map(device => 
+  const deviceOptions = state.audioDevices.map(device =>
     `<option value="${device.deviceId}" ${device.deviceId === state.selectedDeviceId ? 'selected' : ''}>
       ${device.label || `Microphone ${device.deviceId.slice(0, 5)}...`}
     </option>`
@@ -437,6 +441,30 @@ function renderDetailView() {
         </div>
       </div>
       
+      <!-- AI 总结面板 -->
+      <div class="summary-panel" id="summary-panel">
+        <div class="summary-header">
+          <h3>🤖 AI 总结</h3>
+          <div class="summary-actions">
+            ${ConfigManager.isConfigured() ? `
+              <button class="btn btn-sm btn-primary" onclick="generatePageSummary('${page.id}')" ${state.summaryLoading ? 'disabled' : ''}>
+                ${state.summaryLoading ? '⏳ 生成中...' : '✨ 生成总结'}
+              </button>
+            ` : `
+              <button class="btn btn-sm btn-secondary" onclick="showApiKeySettings()">
+                ⚙️ 配置 API Key
+              </button>
+            `}
+          </div>
+        </div>
+        <div class="summary-content" id="summary-content">
+          ${state.pageSummary
+      ? `<div class="summary-text">${state.pageSummary.replace(/\n/g, '<br>')}</div>`
+      : '<p class="text-muted">点击「生成总结」按钮，AI 将自动分析会议内容并生成摘要和待办事项。</p>'
+    }
+        </div>
+      </div>
+      
       <div class="flex gap-md mt-lg">
         <button class="btn btn-primary" onclick="exportPage('${page.id}')">
           📥 导出为文本
@@ -491,6 +519,11 @@ function bindEvents() {
   window.deleteHotword = deleteHotword;
   window.closeHotwords = closeHotwords;
   window.changeAudioDevice = changeAudioDevice;
+  // Gemini functions
+  window.generatePageSummary = generatePageSummary;
+  window.showApiKeySettings = showApiKeySettings;
+  window.saveApiKey = saveApiKey;
+  window.closeApiKeyModal = closeApiKeyModal;
 }
 
 /**
@@ -502,6 +535,125 @@ function changeAudioDevice(deviceId) {
 }
 
 /**
+ * Generate AI summary for a page
+ */
+async function generatePageSummary(pageId) {
+  if (state.summaryLoading) return;
+
+  if (!ConfigManager.isConfigured()) {
+    showApiKeySettings();
+    return;
+  }
+
+  state.summaryLoading = true;
+  state.pageSummary = null;
+  renderApp();
+
+  try {
+    // Get all segments for this page
+    const segments = await SegmentService.getFinalByPageId(pageId);
+
+    if (segments.length === 0) {
+      state.pageSummary = '⚠️ 无转录内容，无法生成总结。';
+      state.summaryLoading = false;
+      renderApp();
+      return;
+    }
+
+    // Build transcript with speaker labels
+    let transcript = '';
+    let lastSpeaker = null;
+
+    segments.forEach(seg => {
+      const speaker = seg.speakerLabel || '说话人';
+      if (speaker !== lastSpeaker) {
+        transcript += `\n【${speaker}】\n`;
+        lastSpeaker = speaker;
+      }
+      transcript += seg.text + ' ';
+    });
+
+    // Call Gemini API
+    const gemini = getGeminiService();
+    const summary = await gemini.generateSummary(transcript.trim());
+
+    state.pageSummary = summary;
+    state.summaryLoading = false;
+    renderApp();
+  } catch (error) {
+    console.error('Summary generation failed:', error);
+    state.pageSummary = `❌ 生成失败: ${error.message}`;
+    state.summaryLoading = false;
+    renderApp();
+  }
+}
+
+/**
+ * Show API Key settings modal
+ */
+function showApiKeySettings() {
+  const currentKey = ConfigManager.getApiKey();
+  const maskedKey = currentKey ? currentKey.slice(0, 8) + '...' + currentKey.slice(-4) : '';
+
+  // Create modal HTML
+  const modalHtml = `
+    <div class="modal-overlay" id="api-key-modal" onclick="closeApiKeyModal(event)">
+      <div class="modal-content" onclick="event.stopPropagation()">
+        <div class="modal-header">
+          <h2>⚙️ Gemini API 配置</h2>
+          <button class="btn btn-sm" onclick="closeApiKeyModal()">✕</button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted mb-md">请输入你的 Gemini API Key 以启用 AI 总结功能。</p>
+          <p class="text-muted mb-md" style="font-size: 0.9em;">
+            获取方式：访问 <a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio</a> 创建 API Key
+          </p>
+          <input type="password" id="api-key-input" class="input" 
+                 placeholder="输入 API Key..." 
+                 value="${currentKey}"
+                 style="width: 100%; margin-bottom: 1rem;">
+          ${maskedKey ? `<p class="text-muted" style="font-size: 0.85em;">当前: ${maskedKey}</p>` : ''}
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="closeApiKeyModal()">取消</button>
+          <button class="btn btn-primary" onclick="saveApiKey()">保存</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Append to body
+  document.body.insertAdjacentHTML('beforeend', modalHtml);
+}
+
+/**
+ * Save API Key
+ */
+function saveApiKey() {
+  const input = document.getElementById('api-key-input');
+  const key = input?.value?.trim();
+
+  if (key) {
+    ConfigManager.setApiKey(key);
+    console.log('API Key saved');
+  }
+
+  closeApiKeyModal();
+  renderApp();
+}
+
+/**
+ * Close API Key modal
+ */
+function closeApiKeyModal(event) {
+  if (event && event.target.id !== 'api-key-modal') return;
+  const modal = document.getElementById('api-key-modal');
+  if (modal) {
+    modal.remove();
+  }
+}
+
+/**
  * Load available audio devices
  */
 async function loadAudioDevices() {
@@ -509,10 +661,10 @@ async function loadAudioDevices() {
     // Request permission first to get labels
     // We do a quick stream init then stop it just to get permissions if needed
     // But usually we load this when entering recording view where user expects it
-    
+
     const devices = await AudioRecorderService.getAudioInputDevices();
     state.audioDevices = devices;
-    
+
     // Set default if not set
     if (!state.selectedDeviceId && devices.length > 0) {
       // Prefer 'default' or first one
@@ -812,7 +964,7 @@ async function stopRecording() {
 
   // If Whisper is available and enabled, re-transcribe with better accuracy
   if (state.whisperAvailable && state.useWhisper && audioResult?.blob) {
-    console.log('Sending audio to Whisper backend for re-transcription...');
+    console.log('Sending audio to backend ASR for re-transcription...');
     try {
       const result = await whisperAPI.transcribe(audioResult.blob, {
         language: 'zh',
@@ -820,13 +972,25 @@ async function stopRecording() {
       });
 
       if (result.success && result.segments?.length > 0) {
-        // Clear Web Speech segments and replace with Whisper results
-        await SegmentService.deleteByPageId(state.currentPageId);
-        await SegmentService.addFromWhisper(state.currentPageId, result.segments);
-        console.log(`Whisper transcription complete: ${result.segments.length} segments`);
+        // Calculate text lengths for comparison
+        const existingSegments = await SegmentService.getFinalByPageId(state.currentPageId);
+        const existingTextLength = existingSegments.reduce((sum, s) => sum + (s.text?.length || 0), 0);
+        const newTextLength = result.segments.reduce((sum, s) => sum + (s.text?.length || 0), 0);
+
+        console.log(`Text comparison: WebSpeech=${existingTextLength} chars, Backend=${newTextLength} chars`);
+
+        // Only replace if backend result is at least 50% as long as WebSpeech
+        // This prevents content loss when backend transcription fails partially
+        if (newTextLength >= existingTextLength * 0.5 || existingTextLength === 0) {
+          await SegmentService.deleteByPageId(state.currentPageId);
+          await SegmentService.addFromWhisper(state.currentPageId, result.segments);
+          console.log(`Backend transcription applied: ${result.segments.length} segments`);
+        } else {
+          console.warn(`Backend result too short (${newTextLength} vs ${existingTextLength}), keeping WebSpeech results`);
+        }
       }
     } catch (error) {
-      console.error('Whisper transcription failed, keeping Web Speech results:', error);
+      console.error('Backend transcription failed, keeping Web Speech results:', error);
     }
   }
 
