@@ -3,10 +3,11 @@
  * 会议转录应用主入口
  */
 
-import { PageService, SegmentService, SpeakerDataService, db } from './services/Database.js';
+import { PageService, SegmentService, SpeakerDataService, HotwordService, AudioService, db } from './services/Database.js';
 import { SpeechRecognitionService } from './services/SpeechRecognition.js';
 import { AudioRecorderService } from './services/AudioRecorder.js';
 import { SpeakerDiarizerService } from './services/SpeakerDiarizer.js';
+import { getWhisperAPI } from './services/WhisperAPI.js';
 import {
   formatDuration,
   formatDateTime,
@@ -33,13 +34,18 @@ const state = {
   currentVolume: 0,
   isSilent: false,
   silenceWarningShown: false,
-  silenceDuration: 0
+  silenceDuration: 0,
+  whisperAvailable: false,  // 后端是否可用
+  useWhisper: false,        // 是否使用 Whisper 转录
+  recognitionActive: false, // 语音识别是否正在工作
+  lastRecognitionTime: 0    // 上次收到识别结果的时间
 };
 
 // Services
 let speechService = null;
 let audioRecorder = null;
 let speakerDiarizer = null;
+let whisperAPI = null;
 
 /**
  * Initialize the application
@@ -58,6 +64,11 @@ async function init() {
   // Initialize services
   speechService = new SpeechRecognitionService();
   audioRecorder = new AudioRecorderService();
+
+  // Check if Whisper backend is available
+  whisperAPI = getWhisperAPI();
+  state.whisperAvailable = await whisperAPI.checkHealth();
+  console.log(`Whisper backend: ${state.whisperAvailable ? '✅ Available' : '❌ Not available'}`);
 
   // Check for unfinished recordings
   await checkUnfinishedRecordings();
@@ -108,16 +119,36 @@ function renderApp() {
       ${state.currentView === 'list' ? renderPageList() : ''}
       ${state.currentView === 'recording' ? renderRecordingView() : ''}
       ${state.currentView === 'detail' ? renderDetailView() : ''}
+      ${state.currentView === 'hotwords' ? '<div id="hotwords-container"><div class="text-center"><p>加载中...</p></div></div>' : ''}
     </main>
   `;
 
   bindEvents();
+
+  // Handle async hotwords view
+  if (state.currentView === 'hotwords') {
+    renderHotwordsViewAsync();
+  }
+}
+
+/**
+ * Render hotwords view asynchronously
+ */
+async function renderHotwordsViewAsync() {
+  const container = document.getElementById('hotwords-container');
+  if (container) {
+    container.innerHTML = await renderHotwordsView();
+  }
 }
 
 /**
  * Render header
  */
 function renderHeader() {
+  const whisperStatus = state.whisperAvailable
+    ? (state.useWhisper ? '🟢 Whisper' : '🔵 Web Speech')
+    : '⚪ Web Speech';
+
   return `
     <header class="header">
       <div class="header-content">
@@ -126,6 +157,15 @@ function renderHeader() {
           <span>Meeting Transcription</span>
         </a>
         <div class="header-actions">
+          ${state.whisperAvailable ? `
+            <button class="btn btn-sm ${state.useWhisper ? 'btn-primary' : 'btn-secondary'}" 
+                    onclick="toggleWhisper()" title="切换 ASR 引擎">
+              ${whisperStatus}
+            </button>
+          ` : ''}
+          <button class="btn btn-secondary btn-sm" onclick="openHotwords()" title="热词管理">
+            🔤 热词
+          </button>
           ${state.currentView === 'list' ? `
             <button class="btn btn-primary" onclick="startNewRecording()">
               <span>➕</span> 新建录音
@@ -250,6 +290,27 @@ function renderRecordingView() {
             ⚠️ 未检测到声音，请检查麦克风
           </div>
         ` : ''}
+        <div class="recognition-diagnostics" id="recognition-diagnostics">
+          <div class="diag-row">
+            <span class="diag-label">识别引擎:</span>
+            <span class="diag-value">${state.useWhisper ? '🟢 Whisper (本地)' : '🔵 Web Speech (网络)'}</span>
+          </div>
+          <div class="diag-row">
+            <span class="diag-label">识别状态:</span>
+            <span class="diag-value" id="recognition-status">
+              ${state.recognitionActive ? '✅ 正在识别' : '⏸️ 等待语音...'}
+            </span>
+          </div>
+          ${!state.useWhisper ? `
+          <div class="diag-row diag-tip">
+            💡 Web Speech API依赖网络，如频繁中断请切换到 Whisper 模式
+          </div>
+          ` : `
+          <div class="diag-row diag-tip">
+            💡 录音结束后将用Whisper重新转录，获得更高精度
+          </div>
+          `}
+        </div>
       ` : ''}
 
       <div class="transcript-container" id="transcript-container">
@@ -338,6 +399,18 @@ function renderDetailView() {
         </div>
       </div>
       
+      <div class="audio-player-section" id="audio-player-section">
+        <div class="audio-controls">
+          <audio id="audio-player" controls style="display: none;"></audio>
+          <div id="audio-loading">🔄 加载音频中...</div>
+        </div>
+        <div class="audio-actions mt-sm">
+          <button class="btn btn-sm btn-secondary" onclick="downloadAudio('${page.id}')" id="download-audio-btn" disabled>
+            💾 下载音频
+          </button>
+        </div>
+      </div>
+      
       <div class="page-detail-content" id="page-content">
         <div class="transcript-placeholder text-center">
           <p>加载中...</p>
@@ -392,6 +465,114 @@ function bindEvents() {
   window.deletePage = deletePage;
   window.exportPage = exportPage;
   window.updatePageTitle = updatePageTitle;
+  window.toggleWhisper = toggleWhisper;
+  window.openHotwords = openHotwords;
+  window.addHotword = addHotword;
+  window.deleteHotword = deleteHotword;
+  window.closeHotwords = closeHotwords;
+}
+
+/**
+ * Toggle Whisper ASR engine
+ */
+function toggleWhisper() {
+  if (!state.whisperAvailable) return;
+  state.useWhisper = !state.useWhisper;
+  console.log(`ASR engine: ${state.useWhisper ? 'Whisper' : 'Web Speech'}`);
+  renderApp();
+}
+
+/**
+ * Open hotwords management modal
+ */
+async function openHotwords() {
+  state.currentView = 'hotwords';
+  renderApp();
+}
+
+/**
+ * Close hotwords modal
+ */
+function closeHotwords() {
+  state.currentView = 'list';
+  renderApp();
+}
+
+/**
+ * Render hotwords management view
+ */
+async function renderHotwordsView() {
+  const hotwords = await HotwordService.getAll();
+  const categories = HotwordService.CATEGORIES;
+
+  const categoryOptions = Object.entries(categories)
+    .map(([key, label]) => `<option value="${key}">${label}</option>`)
+    .join('');
+
+  const hotwordItems = hotwords.length === 0
+    ? '<p class="text-muted text-center">暂无热词，添加热词可提升识别准确度</p>'
+    : hotwords.map(hw => `
+        <div class="hotword-item">
+          <span class="hotword-word">${escapeHtml(hw.word)}</span>
+          <span class="hotword-category badge">${categories[hw.category] || hw.category}</span>
+          <button class="btn btn-sm btn-danger" onclick="deleteHotword('${hw.id}')">删除</button>
+        </div>
+      `).join('');
+
+  return `
+    <div class="hotwords-view">
+      <div class="hotwords-header">
+        <h1>🔤 热词管理</h1>
+        <p class="text-muted">添加自定义热词（人名、技术术语等）提升识别准确度</p>
+      </div>
+      
+      <div class="hotword-form">
+        <input type="text" id="hotword-input" class="input" placeholder="输入热词..." />
+        <select id="hotword-category" class="select">
+          ${categoryOptions}
+        </select>
+        <button class="btn btn-primary" onclick="addHotword()">添加</button>
+      </div>
+      
+      <div class="hotword-list">
+        ${hotwordItems}
+      </div>
+      
+      <div class="mt-lg">
+        <button class="btn btn-secondary" onclick="closeHotwords()">
+          <span>←</span> 返回列表
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * Add a new hotword
+ */
+async function addHotword() {
+  const wordInput = document.getElementById('hotword-input');
+  const categorySelect = document.getElementById('hotword-category');
+
+  const word = wordInput?.value?.trim();
+  const category = categorySelect?.value || 'other';
+
+  if (!word) {
+    alert('请输入热词');
+    return;
+  }
+
+  await HotwordService.add(word, category);
+  wordInput.value = '';
+  renderApp();
+}
+
+/**
+ * Delete a hotword
+ */
+async function deleteHotword(id) {
+  await HotwordService.delete(id);
+  renderApp();
 }
 
 /**
@@ -434,8 +615,8 @@ async function startNewRecording() {
  */
 async function toggleRecording() {
   if (state.isRecording) {
-    // Stop recording
-    stopRecording();
+    // Stop recording - must await to ensure audio blob is saved
+    await stopRecording();
   } else {
     // Start recording
     await startRecording();
@@ -457,6 +638,11 @@ async function startRecording() {
 
   // Setup speech recognition callbacks
   speechService.onResult = (transcript, isFinal, confidence) => {
+    // Update recognition status
+    state.recognitionActive = true;
+    state.lastRecognitionTime = Date.now();
+    updateRecognitionStatus();
+
     if (isFinal) {
       const timestamp = Date.now() - state.recordingStartTime;
 
@@ -493,7 +679,8 @@ async function startRecording() {
 
   speechService.onError = (error) => {
     console.error('Speech recognition error:', error);
-    // Show error but don't stop recording
+    state.recognitionActive = false;
+    updateRecognitionStatus(error);
   };
 
   // Start services
@@ -551,7 +738,9 @@ async function stopRecording() {
   // Stop services
   speechService.stop();
   audioRecorder.stopVolumeMonitoring();
-  audioRecorder.stop();
+
+  // Get audio blob before stopping recorder
+  const audioResult = await audioRecorder.stop();
 
   // Stop timer
   stopTimer();
@@ -568,11 +757,43 @@ async function stopRecording() {
     await SpeakerDataService.save(state.currentPageId, speakerDiarizer.exportData());
   }
 
+  // If Whisper is available and enabled, re-transcribe with better accuracy
+  if (state.whisperAvailable && state.useWhisper && audioResult?.blob) {
+    console.log('Sending audio to Whisper backend for re-transcription...');
+    try {
+      const result = await whisperAPI.transcribe(audioResult.blob, {
+        language: 'zh',
+        useSavedHotwords: true
+      });
+
+      if (result.success && result.segments?.length > 0) {
+        // Clear Web Speech segments and replace with Whisper results
+        await SegmentService.deleteByPageId(state.currentPageId);
+        await SegmentService.addFromWhisper(state.currentPageId, result.segments);
+        console.log(`Whisper transcription complete: ${result.segments.length} segments`);
+      }
+    } catch (error) {
+      console.error('Whisper transcription failed, keeping Web Speech results:', error);
+    }
+  }
+
   // Update page
   await PageService.update(state.currentPageId, {
     status: 'completed',
     duration: duration
   });
+
+  // Save audio blob for playback/download
+  console.log('Audio result from recorder:', audioResult);
+  if (audioResult?.blob) {
+    await AudioService.save(state.currentPageId, audioResult.blob, audioResult.mimeType || 'audio/webm');
+    console.log(`Audio saved: ${(audioResult.blob.size / 1024).toFixed(1)} KB`);
+  } else {
+    console.warn('No audio blob available to save!');
+  }
+
+  // Sync segments to backend for cross-device access
+  await SegmentService.syncToBackend(state.currentPageId);
 }
 
 /**
@@ -606,6 +827,22 @@ async function saveRecording() {
 
   await loadPages();
   navigateTo('list');
+}
+
+/**
+ * Update recognition status in diagnostics panel
+ */
+function updateRecognitionStatus(errorMessage = null) {
+  const statusEl = document.getElementById('recognition-status');
+  if (!statusEl) return;
+
+  if (errorMessage) {
+    statusEl.innerHTML = `<span style="color: var(--color-warning)">⚠️ ${errorMessage}</span>`;
+  } else if (state.recognitionActive) {
+    statusEl.innerHTML = '✅ 正在识别';
+  } else {
+    statusEl.innerHTML = '⏸️ 等待语音...';
+  }
 }
 
 /**
@@ -714,6 +951,28 @@ function stopTimer() {
  * Open a page detail view
  */
 async function openPage(pageId) {
+  // Check page status first
+  const page = state.pages.find(p => p.id === pageId);
+
+  // If page is in 'recording' status, ask user what to do
+  if (page && page.status === 'recording') {
+    const action = confirm('此录音未正常完成。\n\n点击"确定"将其标记为已完成并查看内容，\n点击"取消"删除此录音。');
+
+    if (action) {
+      // Mark as completed
+      await PageService.update(pageId, { status: 'completed' });
+      page.status = 'completed';
+    } else {
+      // Ask if they want to delete
+      const confirmDelete = confirm('确定要删除这个录音吗？');
+      if (confirmDelete) {
+        await deletePage(pageId);
+        return;
+      }
+      return;
+    }
+  }
+
   state.currentPageId = pageId;
   state.currentView = 'detail';
   renderApp();
@@ -758,6 +1017,9 @@ async function openPage(pageId) {
   html += '</div></div></div>'; // Close all
 
   contentEl.innerHTML = html;
+
+  // Load audio player
+  loadAudioPlayer(pageId);
 }
 
 /**
@@ -841,5 +1103,65 @@ async function updatePageTitle(pageId, newTitle) {
   await loadPages();
 }
 
+/**
+ * Load audio player for a page
+ */
+async function loadAudioPlayer(pageId) {
+  const playerEl = document.getElementById('audio-player');
+  const loadingEl = document.getElementById('audio-loading');
+  const downloadBtn = document.getElementById('download-audio-btn');
+
+  if (!playerEl || !loadingEl) return;
+
+  try {
+    const audioUrl = await AudioService.getAudioUrl(pageId);
+
+    if (audioUrl) {
+      playerEl.src = audioUrl;
+      playerEl.style.display = 'block';
+      loadingEl.style.display = 'none';
+      downloadBtn.disabled = false;
+    } else {
+      loadingEl.innerHTML = '📭 无音频文件';
+    }
+  } catch (error) {
+    console.error('Failed to load audio:', error);
+    loadingEl.innerHTML = '❌ 加载音频失败';
+  }
+}
+
+/**
+ * Download audio file
+ */
+async function downloadAudio(pageId) {
+  const page = state.pages.find(p => p.id === pageId);
+  if (!page) return;
+
+  try {
+    const audio = await AudioService.getByPageId(pageId);
+    if (!audio?.blob) {
+      alert('无音频文件可下载');
+      return;
+    }
+
+    // Create download link
+    const url = URL.createObjectURL(audio.blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${page.title.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')}.webm`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    console.error('Failed to download audio:', error);
+    alert('下载音频失败');
+  }
+}
+
+// Expose downloadAudio to global scope
+window.downloadAudio = downloadAudio;
+
 // Initialize app when DOM is ready
 document.addEventListener('DOMContentLoaded', init);
+

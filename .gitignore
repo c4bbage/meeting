@@ -10,5 +10,9 @@ metting/.claude/
 *.log
 .env
 .env.*
-docs/feishu_minutes_analysis.md
-docs/recording_hotwords_implementation.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/

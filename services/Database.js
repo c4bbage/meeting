@@ -1,7 +1,9 @@
 /**
  * Database Service - IndexedDB with Dexie.js
- * 数据持久化服务
+ * 数据持久化服务 + 后端同步
  */
+
+import { PageSync, SegmentSync, isBackendAvailable } from './SyncService.js';
 
 // Database instance
 const db = new Dexie('MeetingTranscriptionDB');
@@ -30,8 +32,24 @@ db.version(2).stores({
   });
 });
 
+// Version 3 - Add hotwords and enhanced segments with word timestamps
+db.version(3).stores({
+  pages: 'id, createdAt, updatedAt, status, syncStatus',
+  segments: 'id, pageId, timestamp, isFinal, speaker, source',
+  audioChunks: 'id, pageId, startTime',
+  speakerData: 'pageId',
+  hotwords: 'id, word, category, createdAt'  // Custom vocabulary
+}).upgrade(tx => {
+  // Add source field to existing segments
+  return tx.table('segments').toCollection().modify(segment => {
+    if (!segment.source) {
+      segment.source = 'web_speech';
+    }
+  });
+});
+
 /**
- * Page operations
+ * Page operations with backend sync
  */
 export const PageService = {
   /**
@@ -50,13 +68,52 @@ export const PageService = {
       ...data
     };
     await db.pages.add(page);
+
+    // Sync to backend (non-blocking)
+    PageSync.create(page).then(result => {
+      if (result) {
+        db.pages.update(page.id, { syncStatus: 'synced' });
+      }
+    });
+
     return page;
   },
 
   /**
    * Get all pages, sorted by creation date (newest first)
+   * Attempts to sync with backend first
    */
   async getAll() {
+    // Try to fetch from backend first
+    const backendPages = await PageSync.fetchAll();
+
+    if (backendPages !== null) {
+      // Merge backend data with local (backend is source of truth)
+      for (const remotePage of backendPages) {
+        const localPage = await db.pages.get(remotePage.id);
+        if (!localPage) {
+          // Add new page from backend
+          await db.pages.add({
+            ...remotePage,
+            createdAt: new Date(remotePage.createdAt),
+            updatedAt: new Date(remotePage.updatedAt),
+            syncStatus: 'synced'
+          });
+        } else {
+          // Update local page with backend data
+          await db.pages.update(remotePage.id, {
+            ...remotePage,
+            createdAt: new Date(remotePage.createdAt),
+            updatedAt: new Date(remotePage.updatedAt),
+            syncStatus: 'synced'
+          });
+        }
+      }
+
+      // Remove locally deleted pages that exist in backend
+      // (keep local pages that might not be synced yet)
+    }
+
     return await db.pages.orderBy('createdAt').reverse().toArray();
   },
 
@@ -73,13 +130,21 @@ export const PageService = {
   async update(id, data) {
     data.updatedAt = new Date();
     await db.pages.update(id, data);
+
+    // Sync to backend
+    PageSync.update(id, data);
+
     return await this.getById(id);
   },
 
   /**
-   * Delete a page and its segments
+   * Delete a page and its segments (soft delete on backend)
    */
   async delete(id) {
+    // Soft delete on backend first
+    await PageSync.delete(id);
+
+    // Delete locally
     await db.segments.where('pageId').equals(id).delete();
     await db.audioChunks.where('pageId').equals(id).delete();
     await db.speakerData.delete(id);
@@ -100,6 +165,18 @@ export const PageService = {
 export const SegmentService = {
   /**
    * Add a transcription segment
+   * @param {string} pageId - The page ID
+   * @param {Object} data - Segment data
+   * @param {string} data.text - Transcribed text
+   * @param {number} data.timestamp - Start time in ms
+   * @param {number} [data.endTime] - End time in ms (from whisper)
+   * @param {number} [data.confidence] - Confidence score 0-1
+   * @param {boolean} [data.isFinal] - Is final result
+   * @param {string} [data.speaker] - Speaker ID
+   * @param {string} [data.speakerLabel] - Speaker display name
+   * @param {string} [data.speakerColor] - Speaker color
+   * @param {Array} [data.words] - Word-level timestamps [{word, start, end, probability}]
+   * @param {string} [data.source] - Transcription source: 'web_speech' | 'whisper'
    */
   async add(pageId, data) {
     const segment = {
@@ -107,15 +184,44 @@ export const SegmentService = {
       pageId,
       text: data.text,
       timestamp: data.timestamp,
+      endTime: data.endTime || null,           // 新增: 结束时间
       confidence: data.confidence || 0,
       isFinal: data.isFinal || false,
       speaker: data.speaker || null,
       speakerLabel: data.speakerLabel || null,
       speakerColor: data.speakerColor || null,
+      words: data.words || null,               // 新增: 单词级时间戳
+      source: data.source || 'web_speech',     // 新增: 转录来源
       createdAt: new Date()
     };
     await db.segments.add(segment);
     return segment;
+  },
+
+  /**
+   * Add multiple segments from Whisper transcription result
+   * @param {string} pageId - The page ID
+   * @param {Array} segments - Whisper segments with start/end/text/words
+   */
+  async addFromWhisper(pageId, segments) {
+    const dbSegments = segments.map((seg, index) => ({
+      id: generateUUID(),
+      pageId,
+      text: seg.text,
+      timestamp: Math.round(seg.start * 1000),  // 秒转毫秒
+      endTime: Math.round(seg.end * 1000),
+      confidence: seg.words?.[0]?.probability || 0.9,
+      isFinal: true,
+      speaker: null,
+      speakerLabel: null,
+      speakerColor: null,
+      words: seg.words || null,
+      source: 'whisper',
+      createdAt: new Date()
+    }));
+
+    await db.segments.bulkAdd(dbSegments);
+    return dbSegments;
   },
 
   /**
@@ -155,6 +261,19 @@ export const SegmentService = {
       .equals(pageId)
       .filter(seg => !seg.isFinal)
       .delete();
+  },
+
+  /**
+   * Sync all final segments for a page to backend
+   */
+  async syncToBackend(pageId) {
+    const segments = await this.getFinalByPageId(pageId);
+    if (segments.length > 0) {
+      const count = await SegmentSync.saveAll(pageId, segments);
+      console.log(`Synced ${count} segments to backend for page ${pageId}`);
+      return count;
+    }
+    return 0;
   }
 };
 
@@ -196,10 +315,171 @@ export const SpeakerDataService = {
 };
 
 /**
+ * Hotword operations - Custom vocabulary management
+ */
+export const HotwordService = {
+  // Category definitions (matching Feishu Minutes)
+  CATEGORIES: {
+    person: '人名',
+    company: '公司',
+    department: '部门',
+    technology: '技术',
+    noun: '名词',
+    location: '地名',
+    traffic: '交通',
+    building: '建筑',
+    occupation: '职业',
+    other: '其他'
+  },
+
+  /**
+   * Add a new hotword
+   */
+  async add(word, category = 'other') {
+    // Check for duplicates
+    const existing = await db.hotwords.where('word').equals(word).first();
+    if (existing) {
+      // Update category if exists
+      await db.hotwords.update(existing.id, {
+        category,
+        updatedAt: new Date()
+      });
+      return { ...existing, category };
+    }
+
+    const hotword = {
+      id: generateUUID(),
+      word,
+      category,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    await db.hotwords.add(hotword);
+    return hotword;
+  },
+
+  /**
+   * Get all hotwords
+   */
+  async getAll() {
+    return await db.hotwords.orderBy('createdAt').reverse().toArray();
+  },
+
+  /**
+   * Get hotwords by category
+   */
+  async getByCategory(category) {
+    return await db.hotwords.where('category').equals(category).toArray();
+  },
+
+  /**
+   * Delete a hotword
+   */
+  async delete(id) {
+    await db.hotwords.delete(id);
+  },
+
+  /**
+   * Get all hotwords as space-separated string (for whisper API)
+   */
+  async getHotwordsString() {
+    const hotwords = await this.getAll();
+    return hotwords.map(hw => hw.word).join(' ');
+  },
+
+  /**
+   * Generate initial prompt from categorized hotwords
+   */
+  async generatePrompt() {
+    const hotwords = await this.getAll();
+    const byCategory = {};
+
+    hotwords.forEach(hw => {
+      if (!byCategory[hw.category]) {
+        byCategory[hw.category] = [];
+      }
+      byCategory[hw.category].push(hw.word);
+    });
+
+    const parts = [];
+    if (byCategory.person?.length) {
+      parts.push(`参与者：${byCategory.person.join('、')}`);
+    }
+    if (byCategory.company?.length) {
+      parts.push(`公司：${byCategory.company.join('、')}`);
+    }
+    if (byCategory.technology?.length) {
+      parts.push(`技术：${byCategory.technology.join('、')}`);
+    }
+
+    return parts.length ? parts.join('。') + '。' : '';
+  }
+};
+
+/**
+ * Audio storage operations - 保存和获取录音音频
+ */
+export const AudioService = {
+  /**
+   * Save audio blob for a page
+   */
+  async save(pageId, blob, mimeType = 'audio/webm') {
+    const audioData = {
+      id: generateUUID(),
+      pageId,
+      blob,
+      mimeType,
+      size: blob.size,
+      createdAt: new Date()
+    };
+    await db.audioChunks.add(audioData);
+    return audioData;
+  },
+
+  /**
+   * Get audio for a page
+   */
+  async getByPageId(pageId) {
+    const chunks = await db.audioChunks.where('pageId').equals(pageId).toArray();
+    if (chunks.length === 0) return null;
+
+    // If multiple chunks, combine them (though we typically save one blob)
+    if (chunks.length === 1) {
+      return chunks[0];
+    }
+
+    // Combine multiple chunks into one blob
+    const blobs = chunks.map(c => c.blob);
+    const combinedBlob = new Blob(blobs, { type: chunks[0].mimeType });
+    return {
+      ...chunks[0],
+      blob: combinedBlob,
+      size: combinedBlob.size
+    };
+  },
+
+  /**
+   * Delete audio for a page
+   */
+  async deleteByPageId(pageId) {
+    await db.audioChunks.where('pageId').equals(pageId).delete();
+  },
+
+  /**
+   * Get audio URL for playback
+   */
+  async getAudioUrl(pageId) {
+    const audio = await this.getByPageId(pageId);
+    if (!audio?.blob) return null;
+    return URL.createObjectURL(audio.blob);
+  }
+};
+
+/**
  * Utility functions
  */
 function generateUUID() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
     const r = Math.random() * 16 | 0;
     const v = c === 'x' ? r : (r & 0x3 | 0x8);
     return v.toString(16);

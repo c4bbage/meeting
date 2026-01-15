@@ -259,19 +259,41 @@ export class AudioRecorderService {
 
     /**
      * Stop recording
+     * @returns {Promise<{blob: Blob, mimeType: string}>} Recorded audio data
      */
     stop() {
-        if (!this.mediaRecorder || !this.isRecording) {
-            return;
-        }
+        return new Promise((resolve) => {
+            if (!this.mediaRecorder || !this.isRecording) {
+                resolve(null);
+                return;
+            }
 
-        try {
-            this.isRecording = false;
-            this.isPaused = false;
-            this.mediaRecorder.stop();
-        } catch (error) {
-            console.warn('Error stopping recorder:', error);
-        }
+            try {
+                // Store the original onStop callback
+                const originalOnStop = this.onStop;
+
+                // Set up one-time handler to resolve promise
+                this.mediaRecorder.onstop = () => {
+                    const mimeType = this.mediaRecorder?.mimeType || 'audio/webm';
+                    const fullBlob = new Blob(this.audioChunks, { type: mimeType });
+
+                    // Call original callback if exists
+                    if (originalOnStop) {
+                        originalOnStop(fullBlob);
+                    }
+
+                    console.log(`Audio recording stopped: ${(fullBlob.size / 1024).toFixed(1)} KB, ${mimeType}`);
+                    resolve({ blob: fullBlob, mimeType });
+                };
+
+                this.isRecording = false;
+                this.isPaused = false;
+                this.mediaRecorder.stop();
+            } catch (error) {
+                console.warn('Error stopping recorder:', error);
+                resolve(null);
+            }
+        });
     }
 
     /**
@@ -350,7 +372,7 @@ export class AudioRecorderService {
         }
 
         if (this.audioContext) {
-            this.audioContext.close().catch(() => {});
+            this.audioContext.close().catch(() => { });
             this.audioContext = null;
         }
 

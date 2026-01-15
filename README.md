@@ -34,21 +34,58 @@ A lightweight, privacy-focused meeting transcription tool that runs entirely in 
 
 ## 🚀 Quick Start
 
-### Browser-only Mode (Web Speech API)
+### 1. 启动后端 (Python API)
 
 ```bash
-# Just open index.html in Chrome/Edge
-open index.html
+cd /Users/cgy/wkgit/meeting
+
+# 首次运行：创建虚拟环境并安装依赖
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -r requirements.txt
+
+# 启动后端服务 (端口 8000)
+python -m uvicorn backend.server:app --host 0.0.0.0 --port 8000
+
+# 开发模式（自动重载）
+python -m uvicorn backend.server:app --reload --port 8000
 ```
 
-### With Local AI (faster-whisper)
+验证后端运行：
+```bash
+curl http://localhost:8000/health
+# 返回: {"status":"ok","service":"meeting-transcription"}
+```
+
+### 2. 启动前端 (HTTP 服务)
 
 ```bash
-# Install Python dependencies
-pip install faster-whisper
+# 在另一个终端窗口
+cd /Users/cgy/wkgit/meeting
+source .venv/bin/activate
 
-# Run transcription service
-python services/transcribe.py
+# 启动静态文件服务 (端口 5500)
+python -m http.server 5500
+```
+
+### 3. 访问应用
+
+打开浏览器访问：**http://localhost:5500**
+
+> ⚠️ **注意**: 必须通过 HTTP 服务器访问（不要直接打开 file://），否则 Web Speech API 和 ES Modules 无法正常工作。
+
+### 仅浏览器模式（无后端）
+
+如果只使用 Web Speech API（无需 Whisper），可以用任意 HTTP 服务器：
+
+```bash
+# 方式1：Python
+python3 -m http.server 5500
+
+# 方式2：Node.js
+npx serve -p 5500
+
+# 方式3：VS Code Live Server 插件
 ```
 
 ## 🔤 Hotwords Support
