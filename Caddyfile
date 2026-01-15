@@ -2,31 +2,30 @@
     # 内网使用，无需 email
 }
 
-# ⚠️ 请将 meeting.lan 替换为你想要的内网域名
-meeting.dobest1.com {
-    # 使用内部自签名证书 (内网模式)
-    tls internal
-
-    # 後端 API 反向代理
+# Caddy listening on port 8000 (HTTPS)
+:8000 {
+    # Use local certificates
+    tls .ssl/cert.pem .ssl/key.pem
+    # 後端 API 反向代理 (Port 6543)
     handle /health {
-        reverse_proxy localhost:8000
+        reverse_proxy localhost:6543
     }
     
     handle /api/* {
-        reverse_proxy localhost:8000
+        reverse_proxy localhost:6543
     }
     
     handle /docs {
-        reverse_proxy localhost:8000
+        reverse_proxy localhost:6543
     }
     
     handle /openapi.json {
-        reverse_proxy localhost:8000
+        reverse_proxy localhost:6543
     }
 
-    # 前端反向代理 (默认)
+    # 前端反向代理 (Port 3456)
     handle /* {
-        reverse_proxy localhost:3000
+        reverse_proxy localhost:3456
     }
     
     # 启用 gzip 压缩

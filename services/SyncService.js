@@ -4,11 +4,11 @@
  */
 
 // 动态获取 API 地址
-// 1. 如果在端口 3000 (默认开发端口)，API 指向端口 8000
-// 2. 如果在其他端口 (如 80/443 通过域名访问)，使用同源地址 (由 Caddy 代理)
+// 1. 如果在端口 3456 (默认开发端口)，API 指向端口 6543
+// 2. 如果在其他端口 (如 8000 通过域名访问)，使用同源地址 (由 Caddy 代理)
 const API_PORT = window.location.port;
-const API_BASE = (API_PORT === '3000')
-    ? `${window.location.protocol}//${window.location.hostname}:8000`
+const API_BASE = (API_PORT === '3456')
+    ? `${window.location.protocol}//${window.location.hostname}:6543`
     : window.location.origin;
 
 /**
