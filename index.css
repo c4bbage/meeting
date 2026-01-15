@@ -852,8 +852,13 @@ h3 {
 }
 
 .badge-error {
-  background: rgba(239, 68, 68, 0.15);
+  background: var(--accent-error-light);
   color: var(--accent-error);
+}
+
+.badge-success {
+  background: var(--accent-success-light);
+  color: var(--accent-success);
 }
 
 /* ========================================

@@ -266,6 +266,55 @@ async def delete_hotword(hotword_id: str):
     return {"success": True}
 
 
+# === Gemini AI Analysis ===
+
+class AnalyzeRequest(BaseModel):
+    transcript: str
+    
+
+@app.get("/api/gemini/status")
+async def gemini_status():
+    """Check if Gemini API is configured."""
+    from .gemini_service import get_gemini_service
+    service = get_gemini_service()
+    return {
+        "available": service.is_available(),
+        "model": service.model
+    }
+
+
+@app.post("/api/analyze")
+async def analyze_meeting(request: AnalyzeRequest):
+    """
+    Analyze meeting transcript using Gemini AI.
+    Returns structured summary, title, key points, and TODOs.
+    """
+    from .gemini_service import get_gemini_service
+    
+    service = get_gemini_service()
+    
+    if not service.is_available():
+        raise HTTPException(
+            status_code=503, 
+            detail="Gemini API 未配置。请在 .env 文件中设置 GEMINI_API_KEY"
+        )
+    
+    if not request.transcript or len(request.transcript.strip()) < 10:
+        raise HTTPException(
+            status_code=400,
+            detail="转录内容太短，无法分析"
+        )
+    
+    try:
+        result = await service.analyze_meeting(request.transcript)
+        return {
+            "success": True,
+            **result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # === Startup Event ===
 
 @app.on_event("startup")
@@ -274,6 +323,15 @@ async def startup_event():
     print(f"Starting Meeting Transcription API with {ASR_ENGINE} engine...")
     # Pre-load the model (will download if needed on first run)
     get_asr_service()
+    
+    # Check Gemini status
+    from .gemini_service import get_gemini_service
+    gemini = get_gemini_service()
+    if gemini.is_available():
+        print(f"✅ Gemini AI available (model: {gemini.model})")
+    else:
+        print("⚠️  Gemini AI not configured (set GEMINI_API_KEY in .env)")
+    
     print("API ready!")
 
 
@@ -282,4 +340,3 @@ async def startup_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

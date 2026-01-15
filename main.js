@@ -3,7 +3,7 @@
  * 会议转录应用主入口
  */
 
-import { PageService, SegmentService, SpeakerDataService, HotwordService, AudioService, db } from './services/Database.js';
+import { PageService, SegmentService, SpeakerDataService, HotwordService, AudioService, TodoService, db } from './services/Database.js';
 import { SpeechRecognitionService } from './services/SpeechRecognition.js';
 import { AudioRecorderService } from './services/AudioRecorder.js';
 import { SpeakerDiarizerService } from './services/SpeakerDiarizer.js';
@@ -232,12 +232,29 @@ function renderPageCard(page) {
     ? '<span class="badge badge-error">录音中</span>'
     : page.status === 'paused'
       ? '<span class="badge badge-warning">已暂停</span>'
-      : '';
+      : page.analyzed
+        ? '<span class="badge badge-success">已分析</span>'
+        : '';
+
+  // Use AI-generated title if available, otherwise fallback to default title
+  const displayTitle = page.autoTitle || page.title;
+
+  // Show word count and todo count if analyzed
+  const statsHtml = page.analyzed ? `
+    <span class="card-meta-item">
+      <span>📝</span>
+      ${page.wordCount || 0} 字
+    </span>
+    <span class="card-meta-item">
+      <span>✅</span>
+      TODO ${page.todoCount || 0}
+    </span>
+  ` : '';
 
   return `
     <div class="card" onclick="openPage('${page.id}')" style="cursor: pointer;">
       <div class="card-header">
-        <h3 class="card-title">${escapeHtml(page.title)}</h3>
+        <h3 class="card-title">${escapeHtml(displayTitle)}</h3>
         ${statusBadge}
       </div>
       <div class="card-meta">
@@ -249,6 +266,7 @@ function renderPageCard(page) {
           <span>⏱️</span>
           ${formatDurationHuman(page.duration)}
         </span>
+        ${statsHtml}
       </div>
       <div class="card-actions mt-md flex gap-sm">
         <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); deletePage('${page.id}')">
@@ -1010,6 +1028,99 @@ async function stopRecording() {
 
   // Sync segments to backend for cross-device access
   await SegmentService.syncToBackend(state.currentPageId);
+
+  // Auto-analyze with Gemini AI (if available)
+  autoAnalyzeRecording(state.currentPageId);
+}
+
+/**
+ * Auto-analyze recording with Gemini AI
+ */
+async function autoAnalyzeRecording(pageId) {
+  try {
+    // Check if Gemini is available
+    const statusRes = await fetch(`${getAPIBase()}/api/gemini/status`);
+    const status = await statusRes.json();
+
+    if (!status.available) {
+      console.log('Gemini AI not configured, skipping auto-analysis');
+      return;
+    }
+
+    // Get transcript text
+    const segments = await SegmentService.getFinalByPageId(pageId);
+    if (segments.length === 0) {
+      console.log('No transcript to analyze');
+      return;
+    }
+
+    // Build transcript text
+    let transcript = '';
+    let lastSpeaker = null;
+    segments.forEach(seg => {
+      const speaker = seg.speakerLabel || '说话人';
+      if (speaker !== lastSpeaker) {
+        transcript += `\n【${speaker}】\n`;
+        lastSpeaker = speaker;
+      }
+      transcript += seg.text + ' ';
+    });
+
+    const wordCount = transcript.replace(/\s/g, '').length;
+
+    console.log('Auto-analyzing with Gemini AI...');
+
+    // Call analyze API
+    const analyzeRes = await fetch(`${getAPIBase()}/api/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transcript: transcript.trim() })
+    });
+
+    if (!analyzeRes.ok) {
+      console.error('Analysis failed:', analyzeRes.status);
+      return;
+    }
+
+    const result = await analyzeRes.json();
+
+    if (result.success) {
+      // Save todos
+      if (result.todos && result.todos.length > 0) {
+        await TodoService.addBatch(pageId, result.todos);
+      }
+
+      // Update page with analysis results
+      await PageService.update(pageId, {
+        autoTitle: result.title,
+        summary: result.summary,
+        keyPoints: result.key_points || [],
+        decisions: result.decisions || [],
+        wordCount: wordCount,
+        todoCount: result.todos?.length || 0,
+        analyzed: true
+      });
+
+      console.log(`✅ AI Analysis complete: "${result.title}", ${result.todos?.length || 0} TODOs`);
+
+      // Reload pages to update list
+      await loadPages();
+      renderApp();
+    }
+  } catch (error) {
+    console.error('Auto-analysis error:', error);
+  }
+}
+
+/**
+ * Get API base URL
+ */
+function getAPIBase() {
+  const port = window.location.port;
+  if (port === '3000') {
+    return `${window.location.protocol}//` + window.location.hostname + ':8000';
+  }
+  return window.location.origin;
 }
 
 /**

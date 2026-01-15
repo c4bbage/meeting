@@ -48,6 +48,27 @@ db.version(3).stores({
   });
 });
 
+// Version 4 - Add todos table and Page AI analysis fields
+db.version(4).stores({
+  pages: 'id, createdAt, updatedAt, status, syncStatus',
+  segments: 'id, pageId, timestamp, isFinal, speaker, source',
+  audioChunks: 'id, pageId, startTime',
+  speakerData: 'pageId',
+  hotwords: 'id, word, category, createdAt',
+  todos: 'id, pageId, category, completed, deadline, createdAt'  // AI-extracted TODOs
+}).upgrade(tx => {
+  // Add analysis fields to existing pages
+  return tx.table('pages').toCollection().modify(page => {
+    if (!page.autoTitle) page.autoTitle = null;
+    if (!page.summary) page.summary = null;
+    if (!page.keyPoints) page.keyPoints = [];
+    if (!page.decisions) page.decisions = [];
+    if (!page.wordCount) page.wordCount = 0;
+    if (!page.todoCount) page.todoCount = 0;
+    if (!page.analyzed) page.analyzed = false;
+  });
+});
+
 /**
  * Page operations with backend sync
  */
@@ -505,6 +526,114 @@ export const AudioService = {
     const audio = await this.getByPageId(pageId);
     if (!audio?.blob) return null;
     return URL.createObjectURL(audio.blob);
+  }
+};
+
+/**
+ * Todo operations
+ */
+export const TodoService = {
+  /**
+   * Add a todo from AI analysis
+   */
+  async add(pageId, todoData) {
+    const todo = {
+      id: generateUUID(),
+      pageId,
+      content: todoData.content,
+      category: todoData.category || '任务',
+      deadline: todoData.deadline || null,
+      priority: todoData.priority || '中',
+      assignee: todoData.assignee || null,
+      completed: todoData.completed || false,
+      needsReminder: todoData.needs_reminder || false,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    await db.todos.add(todo);
+    return todo;
+  },
+
+  /**
+   * Add multiple todos from AI analysis
+   */
+  async addBatch(pageId, todos) {
+    const now = new Date();
+    const dbTodos = todos.map(t => ({
+      id: generateUUID(),
+      pageId,
+      content: t.content,
+      category: t.category || '任务',
+      deadline: t.deadline || null,
+      priority: t.priority || '中',
+      assignee: t.assignee || null,
+      completed: t.completed || false,
+      needsReminder: t.needs_reminder || false,
+      createdAt: now,
+      updatedAt: now
+    }));
+    await db.todos.bulkAdd(dbTodos);
+    return dbTodos;
+  },
+
+  /**
+   * Get all todos for a page
+   */
+  async getByPageId(pageId) {
+    return await db.todos
+      .where('pageId')
+      .equals(pageId)
+      .sortBy('createdAt');
+  },
+
+  /**
+   * Toggle todo completion
+   */
+  async toggle(id) {
+    const todo = await db.todos.get(id);
+    if (todo) {
+      const newCompleted = !todo.completed;
+      await db.todos.update(id, {
+        completed: newCompleted,
+        updatedAt: new Date()
+      });
+      return newCompleted;
+    }
+    return null;
+  },
+
+  /**
+   * Update a todo
+   */
+  async update(id, data) {
+    await db.todos.update(id, {
+      ...data,
+      updatedAt: new Date()
+    });
+  },
+
+  /**
+   * Delete a todo
+   */
+  async delete(id) {
+    await db.todos.delete(id);
+  },
+
+  /**
+   * Delete all todos for a page
+   */
+  async deleteByPageId(pageId) {
+    await db.todos.where('pageId').equals(pageId).delete();
+  },
+
+  /**
+   * Get todo counts (completed/total) for a page
+   */
+  async getCounts(pageId) {
+    const todos = await this.getByPageId(pageId);
+    const total = todos.length;
+    const completed = todos.filter(t => t.completed).length;
+    return { completed, total };
   }
 };
 

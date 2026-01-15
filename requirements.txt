@@ -38,3 +38,4 @@ typing-extensions==4.15.0
 typing-inspection==0.4.2
 uvicorn==0.40.0
 funasr>=1.0.0
+aiohttp>=3.9.0
