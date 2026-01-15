@@ -33,17 +33,41 @@ export class AudioRecorderService {
     }
 
     /**
-     * Request microphone permission and initialize
+     * Get list of available audio input devices
+     * @returns {Promise<MediaDeviceInfo[]>} List of audio input devices
      */
-    async init() {
+    static async getAudioInputDevices() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+            return [];
+        }
         try {
-            this.stream = await navigator.mediaDevices.getUserMedia({
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            return devices.filter(device => device.kind === 'audioinput');
+        } catch (error) {
+            console.error('Error listing devices:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Request microphone permission and initialize
+     * @param {string} [deviceId] - Optional device ID to use specific microphone
+     */
+    async init(deviceId = null) {
+        try {
+            const constraints = {
                 audio: {
                     echoCancellation: true,
                     noiseSuppression: true,
                     autoGainControl: true
                 }
-            });
+            };
+
+            if (deviceId) {
+                constraints.audio.deviceId = { exact: deviceId };
+            }
+
+            this.stream = await navigator.mediaDevices.getUserMedia(constraints);
 
             // Check supported MIME types
             const mimeType = this._getSupportedMimeType();

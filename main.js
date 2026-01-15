@@ -38,7 +38,9 @@ const state = {
   whisperAvailable: false,  // 后端是否可用
   useWhisper: false,        // 是否使用 Whisper 转录
   recognitionActive: false, // 语音识别是否正在工作
-  lastRecognitionTime: 0    // 上次收到识别结果的时间
+  lastRecognitionTime: 0,   // 上次收到识别结果的时间
+  selectedDeviceId: null,   // 当前选中的麦克风ID
+  audioDevices: []          // 可用的音频设备列表
 };
 
 // Services
@@ -266,6 +268,22 @@ function renderRecordingView() {
   // Volume indicator bars
   const volumeBars = renderVolumeBars(state.currentVolume);
 
+  // Generate device options
+  const deviceOptions = state.audioDevices.map(device => 
+    `<option value="${device.deviceId}" ${device.deviceId === state.selectedDeviceId ? 'selected' : ''}>
+      ${device.label || `Microphone ${device.deviceId.slice(0, 5)}...`}
+    </option>`
+  ).join('');
+
+  const deviceSelector = !state.isRecording && state.audioDevices.length > 0 ? `
+    <div class="device-selector mb-md text-center">
+      <label for="audio-device-select" class="text-sm text-muted mr-sm">🎤 选择麦克风:</label>
+      <select id="audio-device-select" class="select select-sm" onchange="changeAudioDevice(this.value)" style="max-width: 200px;">
+        ${deviceOptions}
+      </select>
+    </div>
+  ` : '';
+
   return `
     <div class="recording-view">
       <div class="recording-header">
@@ -275,6 +293,8 @@ function renderRecordingView() {
           <span>${statusText}</span>
         </div>
       </div>
+
+      ${deviceSelector}
 
       ${state.isRecording ? `
         <div class="volume-meter" id="volume-meter">
@@ -470,6 +490,38 @@ function bindEvents() {
   window.addHotword = addHotword;
   window.deleteHotword = deleteHotword;
   window.closeHotwords = closeHotwords;
+  window.changeAudioDevice = changeAudioDevice;
+}
+
+/**
+ * Change audio input device
+ */
+function changeAudioDevice(deviceId) {
+  state.selectedDeviceId = deviceId;
+  console.log('Selected audio device:', deviceId);
+}
+
+/**
+ * Load available audio devices
+ */
+async function loadAudioDevices() {
+  try {
+    // Request permission first to get labels
+    // We do a quick stream init then stop it just to get permissions if needed
+    // But usually we load this when entering recording view where user expects it
+    
+    const devices = await AudioRecorderService.getAudioInputDevices();
+    state.audioDevices = devices;
+    
+    // Set default if not set
+    if (!state.selectedDeviceId && devices.length > 0) {
+      // Prefer 'default' or first one
+      const defaultDevice = devices.find(d => d.deviceId === 'default');
+      state.selectedDeviceId = defaultDevice ? defaultDevice.deviceId : devices[0].deviceId;
+    }
+  } catch (error) {
+    console.error('Failed to load audio devices:', error);
+  }
 }
 
 /**
@@ -606,6 +658,7 @@ async function startNewRecording() {
   // Initialize speaker diarizer with longer threshold to avoid false speaker changes
   speakerDiarizer = new SpeakerDiarizerService({ silenceThreshold: 5000 });
 
+  await loadAudioDevices();
   await loadPages();
   renderApp();
 }
@@ -630,7 +683,7 @@ async function toggleRecording() {
  */
 async function startRecording() {
   // Initialize audio recorder
-  const audioReady = await audioRecorder.init();
+  const audioReady = await audioRecorder.init(state.selectedDeviceId);
   if (!audioReady) {
     alert('无法访问麦克风，请检查权限设置');
     return;

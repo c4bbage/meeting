@@ -37,3 +37,4 @@ typer-slim==0.21.1
 typing-extensions==4.15.0
 typing-inspection==0.4.2
 uvicorn==0.40.0
+funasr>=1.0.0

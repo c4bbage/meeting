@@ -3,7 +3,13 @@
  * 调用后端 API 进行高精度转录
  */
 
-const API_BASE = 'http://localhost:8000';
+// 动态获取 API 地址
+// 1. 如果在端口 3000 (默认开发端口)，API 指向端口 8000
+// 2. 如果在其他端口 (如 80/443 通过域名访问)，使用同源地址 (由 Caddy 代理)
+const API_PORT = window.location.port;
+const API_BASE = (API_PORT === '3000')
+    ? `${window.location.protocol}//${window.location.hostname}:8000`
+    : window.location.origin;
 
 export class WhisperAPI {
     constructor(baseUrl = API_BASE) {

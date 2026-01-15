@@ -1,19 +1,33 @@
 """
 FastAPI Server for Meeting Transcription
+Supports multiple ASR engines: faster-whisper, funasr
 """
 
+import os
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
-from .transcription import get_transcription_service
 from .hotwords import get_hotword_manager, CATEGORIES
 from .storage import PageStorage, SegmentStorage
 
+# ASR Engine selection via environment variable
+# Options: "whisper" (default), "funasr"
+ASR_ENGINE = os.environ.get("ASR_ENGINE", "whisper").lower()
+
+def get_asr_service():
+    """Get the configured ASR service."""
+    if ASR_ENGINE == "funasr":
+        from .funasr_service import get_funasr_service
+        return get_funasr_service()
+    else:
+        from .transcription import get_transcription_service
+        return get_transcription_service()
+
 app = FastAPI(
     title="Meeting Transcription API",
-    description="Audio transcription with faster-whisper and hotwords support",
+    description=f"Audio transcription with {ASR_ENGINE} engine",
     version="1.0.0"
 )
 
@@ -177,12 +191,12 @@ async def transcribe(
             raise HTTPException(status_code=400, detail="Empty audio file")
         
         # Get services
-        svc = get_transcription_service()
+        svc = get_asr_service()
         hw_manager = get_hotword_manager()
         
-        # Combine hotwords
+        # Combine hotwords (only for whisper engine)
         all_hotwords = []
-        if use_saved_hotwords:
+        if ASR_ENGINE == "whisper" and use_saved_hotwords:
             saved = hw_manager.get_hotwords_string()
             if saved:
                 all_hotwords.append(saved)
@@ -257,9 +271,9 @@ async def delete_hotword(hotword_id: str):
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup."""
-    print("Starting Meeting Transcription API...")
+    print(f"Starting Meeting Transcription API with {ASR_ENGINE} engine...")
     # Pre-load the model (will download if needed on first run)
-    get_transcription_service()
+    get_asr_service()
     print("API ready!")
 
 

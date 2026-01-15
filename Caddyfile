@@ -1,0 +1,34 @@
+{
+    # 内网使用，无需 email
+}
+
+# ⚠️ 请将 meeting.lan 替换为你想要的内网域名
+meeting.dobest1.com {
+    # 使用内部自签名证书 (内网模式)
+    tls internal
+
+    # 後端 API 反向代理
+    handle /health {
+        reverse_proxy localhost:8000
+    }
+    
+    handle /api/* {
+        reverse_proxy localhost:8000
+    }
+    
+    handle /docs {
+        reverse_proxy localhost:8000
+    }
+    
+    handle /openapi.json {
+        reverse_proxy localhost:8000
+    }
+
+    # 前端反向代理 (默认)
+    handle /* {
+        reverse_proxy localhost:3000
+    }
+    
+    # 启用 gzip 压缩
+    encode gzip
+}

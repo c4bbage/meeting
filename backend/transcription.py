@@ -6,12 +6,26 @@ from faster_whisper import WhisperModel
 from typing import Optional, List, Dict, Any
 import os
 import tempfile
+import time
+from pathlib import Path
+
+
+# Model cache directory - ensures models are persistently cached
+MODEL_CACHE_DIR = os.environ.get(
+    "WHISPER_MODEL_CACHE",
+    str(Path.home() / ".cache" / "whisper-models")
+)
 
 
 class TranscriptionService:
     """faster-whisper transcription service with hotwords support"""
     
-    def __init__(self, model_size: str = "small", device: str = "auto", compute_type: str = "auto"):
+    def __init__(
+        self, 
+        model_size: str = None, 
+        device: str = None, 
+        compute_type: str = None
+    ):
         """
         Initialize the transcription service.
         
@@ -19,7 +33,18 @@ class TranscriptionService:
             model_size: Whisper model size (tiny, base, small, medium, large-v3)
             device: Device to use (auto, cpu, cuda)
             compute_type: Compute type (auto, int8, float16, float32)
+            
+        Environment variables:
+            WHISPER_MODEL_SIZE: Override model size (default: small)
+            WHISPER_DEVICE: Override device (default: auto)
+            WHISPER_COMPUTE_TYPE: Override compute type (default: auto)
+            WHISPER_MODEL_CACHE: Override cache directory
         """
+        # Get config from environment or use defaults
+        model_size = model_size or os.environ.get("WHISPER_MODEL_SIZE", "small")
+        device = device or os.environ.get("WHISPER_DEVICE", "auto")
+        compute_type = compute_type or os.environ.get("WHISPER_COMPUTE_TYPE", "auto")
+        
         # Auto-detect device
         if device == "auto":
             try:
@@ -32,9 +57,34 @@ class TranscriptionService:
         if compute_type == "auto":
             compute_type = "int8" if device == "cpu" else "float16"
         
-        print(f"Loading Whisper model: {model_size} on {device} ({compute_type})")
-        self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
-        print("Model loaded successfully")
+        # Ensure cache directory exists
+        os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
+        
+        # Check if model is already cached
+        # faster-whisper uses HuggingFace Hub naming: models--Systran--faster-whisper-{size}
+        model_path = Path(MODEL_CACHE_DIR) / f"models--Systran--faster-whisper-{model_size}"
+        is_cached = model_path.exists() and any(model_path.iterdir()) if model_path.exists() else False
+        
+        print("=" * 50)
+        print(f"🎤 Whisper Transcription Service")
+        print(f"   Model: {model_size}")
+        print(f"   Device: {device} ({compute_type})")
+        print(f"   Cache: {MODEL_CACHE_DIR}")
+        print(f"   Status: {'✅ Cached' if is_cached else '📥 Will download'}")
+        print("=" * 50)
+        
+        start_time = time.time()
+        print(f"Loading model...")
+        
+        self.model = WhisperModel(
+            model_size, 
+            device=device, 
+            compute_type=compute_type,
+            download_root=MODEL_CACHE_DIR
+        )
+        
+        elapsed = time.time() - start_time
+        print(f"✅ Model loaded in {elapsed:.1f}s")
     
     def transcribe(
         self,
@@ -143,3 +193,4 @@ def get_transcription_service() -> TranscriptionService:
     if _service is None:
         _service = TranscriptionService()
     return _service
+
