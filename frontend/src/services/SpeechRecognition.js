@@ -224,14 +224,8 @@ export class SpeechRecognitionService {
 
         // Handle end - auto restart if still running
         this.recognition.onend = () => {
-            // 在重启前，提交任何剩余的临时结果
-            if (this.pendingInterim && !this._isDuplicate(this.pendingInterim)) {
-                this._markAsSubmitted(this.pendingInterim);
-                if (this.onResult) {
-                    this.onResult(this.pendingInterim, true, 0.6);
-                }
-                this.pendingInterim = '';
-            }
+            // Reset error counter on successful completion
+            this.consecutiveErrors = 0;
 
             if (!this.isRunning || this.isPaused) {
                 this.isRestarting = false;
@@ -243,6 +237,7 @@ export class SpeechRecognitionService {
                 return;
             }
 
+            // Auto-restart if still supposed to be running
             if (this.isRestarting) {
                 const delayMs = this.restartDelayMs || 0;
                 this.restartDelayMs = 0;
@@ -250,13 +245,14 @@ export class SpeechRecognitionService {
                 return;
             }
 
-            // Auto restart (handles Chrome's ~60s timeout)
             this._scheduleRestart(100);
         };
 
         // Handle errors
         this.recognition.onerror = (event) => {
             const code = event.error;
+
+            // Silently handle no-speech (it's normal)
             if (code === 'no-speech') {
                 return;
             }
@@ -274,19 +270,10 @@ export class SpeechRecognitionService {
                     }
                     this.isRunning = false;
                     break;
-                case 'no-speech':
-                    // This is normal, just means no speech detected, don't stop
-                    // 静音时自动重启以保持连接
-                    break;
-                case 'network':
-                    if (notify && this.onError) {
-                        this.onError('网络错误，请检查网络连接');
-                    }
-                    // 尝试重连 - 使用安全重启
-                    this._safeRestart(1000);
-                    break;
                 case 'aborted':
-                    // User or system aborted, this is expected
+                case 'network':
+                    // Auto-restart using safe restart mechanism
+                    this._safeRestart(1000);
                     break;
                 case 'audio-capture':
                     if (notify && this.onError) {

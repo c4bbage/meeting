@@ -27,9 +27,11 @@
         reverse_proxy localhost:6543
     }
 
-    # 前端反向代理 (Port 3456)
+    # 前端静态文件服务 (React build)
     handle /* {
-        reverse_proxy localhost:3456
+        root * /Users/john/wkgit/meeting/frontend/dist
+        try_files {path} /index.html
+        file_server
     }
     
     # 启用 gzip 压缩

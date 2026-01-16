@@ -4,7 +4,9 @@ Supports multiple ASR engines: faster-whisper, funasr
 """
 
 import os
+from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -58,6 +60,14 @@ class PageCreate(BaseModel):
     createdAt: Optional[str] = None
     duration: int = 0
     status: str = "recording"
+    autoTitle: Optional[str] = None
+    summary: Optional[str] = None
+    keyPoints: Optional[List[str]] = None
+    decisions: Optional[List[str]] = None
+    todos: Optional[List[Dict[str, Any]]] = None
+    todoCount: Optional[int] = None
+    wordCount: Optional[int] = None
+    analyzed: Optional[bool] = None
 
 
 class PageUpdate(BaseModel):
@@ -65,6 +75,14 @@ class PageUpdate(BaseModel):
     duration: Optional[int] = None
     status: Optional[str] = None
     language: Optional[str] = None
+    autoTitle: Optional[str] = None
+    summary: Optional[str] = None
+    keyPoints: Optional[List[str]] = None
+    decisions: Optional[List[str]] = None
+    todos: Optional[List[Dict[str, Any]]] = None
+    todoCount: Optional[int] = None
+    wordCount: Optional[int] = None
+    analyzed: Optional[bool] = None
 
 
 @app.get("/api/pages")
@@ -160,6 +178,76 @@ async def save_segments(page_id: str, data: SegmentsBulkCreate):
         return {"success": True, "count": count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/pages/{page_id}/audio_chunk")
+async def upload_audio_chunk(
+    page_id: str,
+    audio_chunk: UploadFile = File(...),
+    timestamp: str = Form(...)
+):
+    """Upload audio chunk during recording (streaming)."""
+    from pathlib import Path
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Create chunks directory
+        DATA_DIR = Path("data")
+        chunks_dir = DATA_DIR / page_id / "chunks"
+        chunks_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save chunk
+        chunk_filename = f"chunk_{timestamp}.webm"
+        chunk_path = chunks_dir / chunk_filename
+        
+        content = await audio_chunk.read()
+        with open(chunk_path, 'wb') as f:
+            f.write(content)
+        
+        logger.info(f"Saved audio chunk for {page_id}: {len(content)} bytes")
+        return {"success": True, "chunk_id": timestamp, "size": len(content)}
+    except Exception as e:
+        logger.error(f"Failed to save audio chunk: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/pages/{page_id}/audio")
+async def get_audio(page_id: str):
+    """Get combined audio for a page (from chunks or full recording)."""
+    data_dir = Path("data") / page_id
+    full_path = data_dir / "recording.webm"
+    if full_path.exists():
+        return FileResponse(full_path, media_type="audio/webm", filename=f"{page_id}.webm")
+
+    chunks_dir = data_dir / "chunks"
+    if not chunks_dir.exists():
+        raise HTTPException(status_code=404, detail="Audio not found")
+
+    chunk_files = list(chunks_dir.glob("chunk_*.webm"))
+    if not chunk_files:
+        raise HTTPException(status_code=404, detail="Audio not found")
+
+    def chunk_key(path: Path):
+        stem = path.stem
+        try:
+            return int(stem.split("_", 1)[1])
+        except (IndexError, ValueError):
+            return stem
+
+    chunk_files.sort(key=chunk_key)
+
+    def iter_chunks():
+        for path in chunk_files:
+            with open(path, "rb") as fh:
+                while True:
+                    data = fh.read(8192)
+                    if not data:
+                        break
+                    yield data
+
+    headers = {"Content-Disposition": f"inline; filename={page_id}.webm"}
+    return StreamingResponse(iter_chunks(), media_type="audio/webm", headers=headers)
 
 
 # === Transcription API ===

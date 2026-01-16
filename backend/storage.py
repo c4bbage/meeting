@@ -50,6 +50,14 @@ def init_db():
                 duration INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'completed',
                 language TEXT DEFAULT 'zh-CN',
+                auto_title TEXT DEFAULT NULL,
+                summary TEXT DEFAULT NULL,
+                key_points TEXT DEFAULT NULL,
+                decisions TEXT DEFAULT NULL,
+                todos TEXT DEFAULT NULL,
+                todo_count INTEGER DEFAULT 0,
+                word_count INTEGER DEFAULT 0,
+                analyzed INTEGER DEFAULT 0,
                 deleted_at TEXT DEFAULT NULL
             )
         """)
@@ -79,9 +87,45 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_segments_page_id ON segments(page_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_pages_deleted_at ON pages(deleted_at)")
 
+        # Ensure new columns exist on older databases
+        cursor.execute("PRAGMA table_info(pages)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        columns_to_add = {
+            "auto_title": "TEXT DEFAULT NULL",
+            "summary": "TEXT DEFAULT NULL",
+            "key_points": "TEXT DEFAULT NULL",
+            "decisions": "TEXT DEFAULT NULL",
+            "todos": "TEXT DEFAULT NULL",
+            "todo_count": "INTEGER DEFAULT 0",
+            "word_count": "INTEGER DEFAULT 0",
+            "analyzed": "INTEGER DEFAULT 0"
+        }
+        for column, definition in columns_to_add.items():
+            if column not in existing_columns:
+                cursor.execute(f"ALTER TABLE pages ADD COLUMN {column} {definition}")
+
 
 # Initialize on import
 init_db()
+
+
+def _serialize_json(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _parse_json(value: Optional[str], default: Any):
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
+def _row_value(row: sqlite3.Row, key: str, default: Any = None):
+    return row[key] if key in row.keys() else default
 
 
 class PageStorage:
@@ -91,11 +135,18 @@ class PageStorage:
     def create(page_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new page."""
         now = datetime.now().isoformat()
+        key_points = _serialize_json(page_data.get('keyPoints') or page_data.get('key_points'))
+        decisions = _serialize_json(page_data.get('decisions'))
+        todos = _serialize_json(page_data.get('todos'))
+        analyzed = 1 if page_data.get('analyzed') else 0
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO pages (id, title, created_at, updated_at, duration, status, language)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO pages (
+                    id, title, created_at, updated_at, duration, status, language,
+                    auto_title, summary, key_points, decisions, todos, todo_count, word_count, analyzed
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 page_data.get('id'),
                 page_data.get('title') or '未命名录音',
@@ -103,7 +154,15 @@ class PageStorage:
                 now,
                 page_data.get('duration') or 0,
                 page_data.get('status') or 'completed',
-                page_data.get('language') or 'zh-CN'
+                page_data.get('language') or 'zh-CN',
+                page_data.get('autoTitle'),
+                page_data.get('summary'),
+                key_points,
+                decisions,
+                todos,
+                page_data.get('todoCount') or 0,
+                page_data.get('wordCount') or 0,
+                analyzed
             ))
         return PageStorage.get_by_id(page_data['id'])
     
@@ -141,8 +200,30 @@ class PageStorage:
             for key, value in data.items():
                 if key in ('title', 'duration', 'status', 'language'):
                     db_key = key
-                    fields.append(f"{db_key} = ?")
-                    values.append(value)
+                elif key == 'autoTitle':
+                    db_key = 'auto_title'
+                elif key == 'summary':
+                    db_key = 'summary'
+                elif key == 'keyPoints':
+                    db_key = 'key_points'
+                    value = _serialize_json(value)
+                elif key == 'decisions':
+                    db_key = 'decisions'
+                    value = _serialize_json(value)
+                elif key == 'todos':
+                    db_key = 'todos'
+                    value = _serialize_json(value)
+                elif key == 'todoCount':
+                    db_key = 'todo_count'
+                elif key == 'wordCount':
+                    db_key = 'word_count'
+                elif key == 'analyzed':
+                    db_key = 'analyzed'
+                    value = 1 if value else 0
+                else:
+                    continue
+                fields.append(f"{db_key} = ?")
+                values.append(value)
             
             if fields:
                 fields.append("updated_at = ?")
@@ -184,6 +265,14 @@ class PageStorage:
             'duration': row['duration'],
             'status': row['status'],
             'language': row['language'],
+            'autoTitle': _row_value(row, 'auto_title'),
+            'summary': _row_value(row, 'summary'),
+            'keyPoints': _parse_json(_row_value(row, 'key_points'), []),
+            'decisions': _parse_json(_row_value(row, 'decisions'), []),
+            'todos': _parse_json(_row_value(row, 'todos'), []),
+            'todoCount': _row_value(row, 'todo_count', 0),
+            'wordCount': _row_value(row, 'word_count', 0),
+            'analyzed': bool(_row_value(row, 'analyzed', 0)),
             'deletedAt': row['deleted_at']
         }
 
