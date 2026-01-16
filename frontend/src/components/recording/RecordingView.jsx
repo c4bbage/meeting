@@ -613,16 +613,33 @@ function RecordingView() {
             const volume = audioRecorderRef.current.getVolume();
             setVolume(volume);
 
-            // Visualization logic here (simplified)
             canvas.width = canvas.offsetWidth;
             canvas.height = canvas.offsetHeight;
 
-            ctx.fillStyle = '#1a1a1a';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            const barHeight = (volume / 100) * canvas.height;
-            ctx.fillStyle = '#4CAF50';
-            ctx.fillRect(0, canvas.height - barHeight, canvas.width, barHeight);
+            const waveform = audioRecorderRef.current.getWaveformData();
+            if (waveform.length > 0) {
+                const midY = canvas.height / 2;
+                const amplitude = canvas.height * 0.25;
+                ctx.lineWidth = 1.5;
+                ctx.strokeStyle = 'rgba(0, 243, 255, 0.35)';
+                ctx.beginPath();
+                const sliceWidth = canvas.width / waveform.length;
+                let xPos = 0;
+                for (let i = 0; i < waveform.length; i++) {
+                    const v = waveform[i] / 128.0 - 1;
+                    const y = midY + v * amplitude;
+                    if (i === 0) {
+                        ctx.moveTo(xPos, y);
+                    } else {
+                        ctx.lineTo(xPos, y);
+                    }
+                    xPos += sliceWidth;
+                }
+                ctx.lineTo(canvas.width, midY);
+                ctx.stroke();
+            }
 
             visualizerAnimationRef.current = requestAnimationFrame(draw);
         };
@@ -686,87 +703,87 @@ function RecordingView() {
         return <div dangerouslySetInnerHTML={{ __html: html }} />;
     };
 
+    const recordingStatusLabel = isRecording ? '录音中' : '准备录音';
+    const recognitionStatusLabel = (useWhisper && whisperAvailable ? streamingActive : recognitionActive)
+        ? '🟢 LISTENING...'
+        : '🟡 STANDBY';
+
     return (
         <div className="recording-view">
-            <div className="recording-header">
-                <div className="recording-timer" id="timer">{timer}</div>
-                <div className={`recording-status ${isRecording ? 'active' : ''}`}>
-                    <span className="recording-status-dot"></span>
-                    <span>{isRecording ? '录音中' : '准备录音'}</span>
-                </div>
-            </div>
-
-            {!isRecording && (
-                <div className="recording-setup-row">
-                    {audioDevices.length > 0 && (
-                        <div className="device-selector-inline">
-                            <label htmlFor="audio-device-select" className="text-sm text-muted mr-sm">
-                                🎤 选择麦克风:
-                            </label>
-                            <select
-                                id="audio-device-select"
-                                className="select select-sm"
-                                value={selectedDeviceId || ''}
-                                onChange={(e) => handleDeviceChange(e.target.value)}
-                            >
-                                {audioDevices.map(device => (
-                                    <option key={device.deviceId} value={device.deviceId}>
-                                        {device.label || `Microphone ${device.deviceId.slice(0, 5)}...`}
-                                    </option>
-                                ))}
-                            </select>
-                        </div>
-                    )}
-                    <button className="btn btn-primary btn-lg" onClick={handleToggleRecording}>
-                        开始录音
-                    </button>
-                </div>
-            )}
-
-            {useWhisper && whisperAvailable && (
-                <div className="compare-toggle mb-sm text-center">
-                    <button
-                        className={`btn btn-sm ${compareMode ? 'btn-primary' : 'btn-secondary'}`}
-                        onClick={toggleCompareMode}
-                    >
-                        {compareMode ? '对比模式：开' : '对比模式：关'}
-                    </button>
-                </div>
-            )}
-
-            {isRecording && (
-                <>
-                    <canvas id="audio-visualizer"></canvas>
-                    <div className="recognition-diagnostics">
-                        <div className="diag-row">
-                            <span className="diag-label">ENGINE:</span>
-                            <span className="diag-value">
-                                {useWhisper ? '🧠 FUNASR_ENGINE' : '🌐 WEB_SPEECH_API'}
-                            </span>
-                        </div>
-                        <div className="diag-row">
-                            <span className="diag-label">STATUS:</span>
-                            <span className="diag-value">
-                                {(useWhisper && whisperAvailable ? streamingActive : recognitionActive)
-                                    ? '🟢 LISTENING...'
-                                    : '🟡 STANDBY'}
-                            </span>
-                        </div>
+            {isRecording && <canvas id="audio-visualizer"></canvas>}
+            <div className="recording-content">
+                <div className="recording-header">
+                    <div className="recording-timer" id="timer">{timer}</div>
+                    <div className={`status-strip ${isRecording ? 'active' : ''}`}>
+                        <span className="status-item">
+                            <span className={`status-dot ${isRecording ? 'active' : ''}`}></span>
+                            <span>{recordingStatusLabel}</span>
+                        </span>
+                        <span className="status-divider">•</span>
+                        <span className="status-item">
+                            ENGINE: {useWhisper ? '🧠 FUNASR_ENGINE' : '🌐 WEB_SPEECH_API'}
+                        </span>
+                        <span className="status-divider">•</span>
+                        <span className="status-item">ASR: {recognitionStatusLabel}</span>
+                        {useWhisper && whisperAvailable && (
+                            <>
+                                <span className="status-divider">•</span>
+                                <span className="status-item">STREAM: {streamingActive ? '🟢 LIVE' : '🟡 CONNECTING'}</span>
+                            </>
+                        )}
                     </div>
-                </>
-            )}
-
-            <div className="transcript-container">
-                {renderTranscript()}
-            </div>
-
-            {isRecording && (
-                <div className="recording-controls">
-                    <button className="btn btn-primary" onClick={handleToggleRecording}>
-                        结束并保存
-                    </button>
                 </div>
-            )}
+
+                {!isRecording && (
+                    <div className="recording-setup-row">
+                        {audioDevices.length > 0 && (
+                            <div className="device-selector-inline">
+                                <label htmlFor="audio-device-select" className="text-sm text-muted mr-sm">
+                                    🎤 选择麦克风:
+                                </label>
+                                <select
+                                    id="audio-device-select"
+                                    className="select select-sm"
+                                    value={selectedDeviceId || ''}
+                                    onChange={(e) => handleDeviceChange(e.target.value)}
+                                >
+                                    {audioDevices.map(device => (
+                                        <option key={device.deviceId} value={device.deviceId}>
+                                            {device.label || `Microphone ${device.deviceId.slice(0, 5)}...`}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                        )}
+                        <button className="btn btn-primary btn-lg" onClick={handleToggleRecording}>
+                            开始录音
+                        </button>
+                    </div>
+                )}
+
+                {useWhisper && whisperAvailable && (
+                    <div className="compare-toggle mb-sm text-center">
+                        <button
+                            className={`btn btn-sm ${compareMode ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={toggleCompareMode}
+                        >
+                            {compareMode ? '对比模式：开' : '对比模式：关'}
+                        </button>
+                    </div>
+                )}
+
+                <div className="transcript-container">
+                    {renderTranscript()}
+                </div>
+
+                {isRecording && (
+                    <div className="recording-controls">
+                        <button className="btn btn-primary" onClick={handleToggleRecording}>
+                            结束并保存
+                        </button>
+                    </div>
+                )}
+            </div>
         </div>
     );
 }

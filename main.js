@@ -435,6 +435,22 @@ function isStreamingPreferred() {
 function renderRecordingView() {
   const statusClass = state.isRecording ? 'active' : '';
   const statusText = state.isRecording ? '录音中' : '准备录音';
+  const statusStrip = `
+    <div class="status-strip ${statusClass}">
+      <span class="status-item">
+        <span class="status-dot ${statusClass}"></span>
+        <span>${statusText}</span>
+      </span>
+      <span class="status-divider">•</span>
+      <span class="status-item">ENGINE: ${state.useWhisper ? '🧠 NEURAL_LINK_V2' : '🌐 WEB_NET_API'}</span>
+      <span class="status-divider">•</span>
+      <span class="status-item">ASR: <span id="recognition-status">${state.recognitionActive ? '🟢 LISTENING...' : '🟡 STANDBY'}</span></span>
+      ${state.useWhisper ? `
+        <span class="status-divider">•</span>
+        <span class="status-item">STREAM: <span id="streaming-status">${state.streamingActive ? '🟢 LIVE' : '🟡 CONNECTING'}</span></span>
+      ` : ''}
+    </div>
+  `;
 
   // Volume indicator bars
   const volumeBars = renderVolumeBars(state.currentVolume);
@@ -499,58 +515,33 @@ function renderRecordingView() {
 
   return `
     <div class="recording-view">
-      <div class="recording-header">
-        <div class="recording-timer" id="timer">00:00</div>
-        <div class="recording-status ${statusClass}">
-          <span class="recording-status-dot"></span>
-          <span>${statusText}</span>
+      ${state.isRecording ? '<canvas id="audio-visualizer"></canvas>' : ''}
+      <div class="recording-content">
+        <div class="recording-header">
+          <div class="recording-timer" id="timer">00:00</div>
+          ${statusStrip}
         </div>
+
+        ${!state.isRecording ? `
+          <div class="recording-setup-row">
+            ${deviceSelectControl}
+            <button class="btn btn-primary btn-lg" onclick="toggleRecording()">
+              开始录音
+            </button>
+          </div>
+        ` : ''}
+        ${compareToggle}
+
+        ${transcriptHtml}
+
+        ${state.isRecording ? `
+          <div class="recording-controls">
+            <button class="btn btn-primary" onclick="saveRecording()">
+              结束并保存
+            </button>
+          </div>
+        ` : ''}
       </div>
-
-      ${!state.isRecording ? `
-        <div class="recording-setup-row">
-          ${deviceSelectControl}
-          <button class="btn btn-primary btn-lg" onclick="toggleRecording()">
-            开始录音
-          </button>
-        </div>
-      ` : ''}
-      ${compareToggle}
-
-      ${state.isRecording ? `
-        <canvas id="audio-visualizer"></canvas>
-        <div class="recognition-diagnostics" id="recognition-diagnostics">
-          <div class="diag-row">
-            <span class="diag-label">ENGINE:</span>
-            <span class="diag-value">${state.useWhisper ? '🧠 NEURAL_LINK_V2' : '🌐 WEB_NET_API'}</span>
-          </div>
-          <div class="diag-row">
-            <span class="diag-label">STATUS:</span>
-            <span class="diag-value" id="recognition-status">
-              ${state.recognitionActive ? '🟢 LISTENING...' : '🟡 STANDBY'}
-            </span>
-          </div>
-          ${state.useWhisper ? `
-          <div class="diag-row">
-            <span class="diag-label">STREAM:</span>
-            <span class="diag-value" id="streaming-status">${state.streamingActive ? '🟢 LIVE' : '🟡 CONNECTING'}</span>
-          </div>
-          <div class="diag-row diag-tip">
-            >> SYSTEM: Neural streaming active; final pass refines post-recording.
-          </div>
-          ` : ''}
-        </div>
-      ` : ''}
-
-      ${transcriptHtml}
-
-      ${state.isRecording ? `
-        <div class="recording-controls">
-          <button class="btn btn-primary" onclick="saveRecording()">
-            结束并保存
-          </button>
-        </div>
-      ` : ''}
     </div>
   `;
 }
@@ -2150,22 +2141,20 @@ function drawVisualizer() {
   const width = canvas.width = canvas.offsetWidth;
   const height = canvas.height = canvas.offsetHeight;
 
-  // Get data
-  const dataArray = audioRecorder.getFrequencyData(); // Needs getFrequencyData exposed in service
-  // Or check if it exists. AudioRecorderService in step 231 HAS getFrequencyData.
-
   ctx.clearRect(0, 0, width, height);
 
   const waveform = audioRecorder.getWaveformData();
   if (waveform.length > 0) {
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = 'rgba(0, 243, 255, 0.9)';
+    const midY = height / 2;
+    const amplitude = height * 0.25;
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(0, 243, 255, 0.35)';
     ctx.beginPath();
     const sliceWidth = width / waveform.length;
     let xPos = 0;
     for (let i = 0; i < waveform.length; i++) {
-      const v = waveform[i] / 128.0;
-      const y = (v * height) / 2;
+      const v = waveform[i] / 128.0 - 1;
+      const y = midY + v * amplitude;
       if (i === 0) {
         ctx.moveTo(xPos, y);
       } else {
@@ -2173,7 +2162,7 @@ function drawVisualizer() {
       }
       xPos += sliceWidth;
     }
-    ctx.lineTo(width, height / 2);
+    ctx.lineTo(width, midY);
     ctx.stroke();
   }
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { usePageStore } from '../../store/pageStore';
 import { PageService, SegmentService, AudioService, TodoService } from '../../services/Database';
@@ -29,11 +29,16 @@ function DetailView() {
     const [segments, setSegments] = useState([]);
     const [audioUrl, setAudioUrl] = useState(null);
     const [audioLoading, setAudioLoading] = useState(true);
-    const [summaryLoadedFromPage, setSummaryLoadedFromPage] = useState(false);
+    const summaryLoadedFromPageRef = useRef(false);
+
+    useEffect(() => {
+        if (!id) return;
+        summaryLoadedFromPageRef.current = false;
+        setPageSummary(null);
+    }, [id, setPageSummary]);
 
     useEffect(() => {
         if (id) {
-            setSummaryLoadedFromPage(false);
             loadPageData();
         }
     }, [id, pages]);
@@ -43,9 +48,9 @@ function DetailView() {
         const foundPage = pages.find(p => p.id === id);
         if (foundPage) {
             setPage(foundPage);
-            if (!summaryLoadedFromPage && foundPage.summary) {
+            if (!summaryLoadedFromPageRef.current && foundPage.summary) {
                 setPageSummary(buildSummaryText(foundPage));
-                setSummaryLoadedFromPage(true);
+                summaryLoadedFromPageRef.current = true;
             }
         }
 
