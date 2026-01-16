@@ -18,6 +18,7 @@ export class SpeechRecognitionService {
         this.recognition = new SpeechRecognition();
         this.isRunning = false;
         this.isPaused = false;
+        this.isRestarting = false; // Prevent concurrent restart attempts
 
         // Enhanced Configuration for better recognition
         this.recognition.continuous = true;        // Keep listening
@@ -116,6 +117,39 @@ export class SpeechRecognitionService {
     }
 
     /**
+     * Safe restart - stops first then restarts after delay
+     * Prevents "already started" errors
+     */
+    _safeRestart(delayMs = 100) {
+        if (this.isRestarting || !this.isRunning || this.isPaused) {
+            return;
+        }
+        this.isRestarting = true;
+
+        // Stop first
+        try {
+            this.recognition.stop();
+        } catch (e) {
+            // Ignore stop errors
+        }
+
+        // Then restart after delay
+        setTimeout(() => {
+            if (this.isRunning && !this.isPaused) {
+                try {
+                    this.recognition.start();
+                    this.isRestarting = false;
+                } catch (e) {
+                    console.warn('Safe restart failed:', e);
+                    this.isRestarting = false;
+                }
+            } else {
+                this.isRestarting = false;
+            }
+        }, delayMs);
+    }
+
+    /**
      * Setup event handlers
      */
     _setupEventHandlers() {
@@ -171,28 +205,11 @@ export class SpeechRecognitionService {
                 this.pendingInterim = '';
             }
 
+            this.isRestarting = false; // Reset restart flag
+
             if (this.isRunning && !this.isPaused) {
                 // Auto restart (handles Chrome's ~60s timeout)
-                // 添加小延迟以确保稳定性
-                setTimeout(() => {
-                    if (this.isRunning && !this.isPaused) {
-                        try {
-                            this.recognition.start();
-                        } catch (e) {
-                            console.warn('Auto-restart failed:', e);
-                            // 再次尝试
-                            setTimeout(() => {
-                                try {
-                                    if (this.isRunning) {
-                                        this.recognition.start();
-                                    }
-                                } catch (e2) {
-                                    console.error('Second restart attempt failed:', e2);
-                                }
-                            }, 500);
-                        }
-                    }
-                }, 100);
+                this._safeRestart(100);
             } else {
                 if (this.onEnd) {
                     this.onEnd();
@@ -228,14 +245,8 @@ export class SpeechRecognitionService {
                     if (notify && this.onError) {
                         this.onError('网络错误，请检查网络连接');
                     }
-                    // 尝试重连
-                    setTimeout(() => {
-                        if (this.isRunning) {
-                            try {
-                                this.recognition.start();
-                            } catch (e) { }
-                        }
-                    }, 1000);
+                    // 尝试重连 - 使用安全重启
+                    this._safeRestart(1000);
                     break;
                 case 'aborted':
                     // User or system aborted, this is expected

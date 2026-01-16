@@ -9,7 +9,7 @@ import { AudioRecorderService } from './services/AudioRecorder.js';
 import { SpeakerDiarizerService } from './services/SpeakerDiarizer.js';
 import { getWhisperAPI } from './services/WhisperAPI.js';
 import { WebSocketService } from './services/WebSocketService.js';
-import { getGeminiService, ConfigManager } from './services/GeminiService.js';
+
 import {
   formatDuration,
   formatDateTime,
@@ -40,6 +40,7 @@ const state = {
   silenceDuration: 0,
   whisperAvailable: false,  // 后端是否可用
   useWhisper: false,        // 是否使用 Whisper 转录
+  geminiAvailable: false,   // Gemini AI 是否可用
   recognitionActive: false, // 语音识别是否正在工作
   lastRecognitionTime: 0,   // 上次收到识别结果的时间
   selectedDeviceId: null,   // 当前选中的麦克风ID
@@ -60,6 +61,7 @@ const state = {
   audioCacheQueue: [],
   audioCacheSaving: false,
   audioCachedChunks: 0,
+  segmentSyncInterval: null,  // 定期同步 segments 到后端
   showApiKeyModal: false,   // 显示 API Key 配置模态框
   currentSource: null,      // 当前显示的转录版本 (null = 默认/web_speech)
   availableSources: []      // 可用的转录版本列表
@@ -107,6 +109,15 @@ async function init() {
       fetch(`${whisperAPI.baseUrl}/api/preload`, { method: 'POST' });
     } catch (error) {
       console.warn('Preload request failed:', error);
+    }
+    // Check Gemini availability from backend
+    try {
+      const geminiRes = await fetch(`${whisperAPI.baseUrl}/api/gemini/status`);
+      const geminiStatus = await geminiRes.json();
+      state.geminiAvailable = geminiStatus.available === true;
+      console.log(`Gemini AI: ${state.geminiAvailable ? '✅ Available' : '❌ Not configured'}`);
+    } catch (e) {
+      console.warn('Gemini status check failed:', e);
     }
   }
 
@@ -619,14 +630,12 @@ function renderDetailView() {
         <div class="summary-header">
           <h3>🤖 AI 总结</h3>
           <div class="summary-actions">
-            ${ConfigManager.isConfigured() ? `
+            ${state.geminiAvailable ? `
               <button class="btn btn-sm btn-primary" onclick="generatePageSummary('${page.id}')" ${state.summaryLoading ? 'disabled' : ''}>
                 ${state.summaryLoading ? '⏳ 生成中...' : '✨ 生成总结'}
               </button>
             ` : `
-              <button class="btn btn-sm btn-secondary" onclick="showApiKeySettings()">
-                ⚙️ 配置 API Key
-              </button>
+              <span class="text-muted text-sm">⚠️ 后端 Gemini 未配置</span>
             `}
           </div>
         </div>
@@ -751,9 +760,6 @@ function bindEvents() {
   window.changeAudioDevice = changeAudioDevice;
   // Gemini functions
   window.generatePageSummary = generatePageSummary;
-  window.showApiKeySettings = showApiKeySettings;
-  window.saveApiKey = saveApiKey;
-  window.closeApiKeyModal = closeApiKeyModal;
   window.switchTranscriptSource = switchTranscriptSource;
   window.toggleTodo = toggleTodo;
   window.toggleCompareMode = toggleCompareMode;
@@ -774,8 +780,9 @@ function changeAudioDevice(deviceId) {
 async function generatePageSummary(pageId) {
   if (state.summaryLoading) return;
 
-  if (!ConfigManager.isConfigured()) {
-    showApiKeySettings();
+  if (!state.geminiAvailable) {
+    state.pageSummary = '⚠️ 后端 Gemini 未配置。请在 .env 文件中设置 GEMINI_API_KEY。';
+    renderApp();
     return;
   }
 
@@ -807,11 +814,49 @@ async function generatePageSummary(pageId) {
       transcript += seg.text + ' ';
     });
 
-    // Call Gemini API
-    const gemini = getGeminiService();
-    const summary = await gemini.generateSummary(transcript.trim());
+    // Call backend analyze API
+    const analyzeRes = await fetch(`${getAPIBase()}/api/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transcript: transcript.trim() })
+    });
 
-    state.pageSummary = summary;
+    if (!analyzeRes.ok) {
+      throw new Error(`API error: ${analyzeRes.status}`);
+    }
+
+    const result = await analyzeRes.json();
+
+    if (result.success) {
+      // Format summary display
+      let summaryText = `## ${result.title}\n\n${result.summary}\n\n`;
+      if (result.key_points && result.key_points.length > 0) {
+        summaryText += `### 关键要点\n${result.key_points.map(p => `- ${p}`).join('\n')}\n\n`;
+      }
+      if (result.decisions && result.decisions.length > 0) {
+        summaryText += `### 决策\n${result.decisions.map(d => `- ${d}`).join('\n')}`;
+      }
+      state.pageSummary = summaryText;
+
+      // Save todos
+      if (result.todos && result.todos.length > 0) {
+        await TodoService.addBatch(pageId, result.todos);
+        state.pageTodos = await TodoService.getByPageId(pageId);
+      }
+
+      // Update page
+      await PageService.update(pageId, {
+        autoTitle: result.title,
+        summary: result.summary,
+        keyPoints: result.key_points || [],
+        decisions: result.decisions || [],
+        todoCount: result.todos?.length || 0,
+        analyzed: true
+      });
+    } else {
+      state.pageSummary = '❌ 分析失败';
+    }
+
     state.summaryLoading = false;
     renderApp();
   } catch (error) {
@@ -819,71 +864,6 @@ async function generatePageSummary(pageId) {
     state.pageSummary = `❌ 生成失败: ${error.message}`;
     state.summaryLoading = false;
     renderApp();
-  }
-}
-
-/**
- * Show API Key settings modal
- */
-function showApiKeySettings() {
-  const currentKey = ConfigManager.getApiKey();
-  const maskedKey = currentKey ? currentKey.slice(0, 8) + '...' + currentKey.slice(-4) : '';
-
-  // Create modal HTML
-  const modalHtml = `
-    <div class="modal-overlay" id="api-key-modal" onclick="closeApiKeyModal(event)">
-      <div class="modal-content" onclick="event.stopPropagation()">
-        <div class="modal-header">
-          <h2>⚙️ Gemini API 配置</h2>
-          <button class="btn btn-sm" onclick="closeApiKeyModal()">✕</button>
-        </div>
-        <div class="modal-body">
-          <p class="text-muted mb-md">请输入你的 Gemini API Key 以启用 AI 总结功能。</p>
-          <p class="text-muted mb-md" style="font-size: 0.9em;">
-            获取方式：访问 <a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio</a> 创建 API Key
-          </p>
-          <input type="password" id="api-key-input" class="input" 
-                 placeholder="输入 API Key..." 
-                 value="${currentKey}"
-                 style="width: 100%; margin-bottom: 1rem;">
-          ${maskedKey ? `<p class="text-muted" style="font-size: 0.85em;">当前: ${maskedKey}</p>` : ''}
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-secondary" onclick="closeApiKeyModal()">取消</button>
-          <button class="btn btn-primary" onclick="saveApiKey()">保存</button>
-        </div>
-      </div>
-    </div>
-  `;
-
-  // Append to body
-  document.body.insertAdjacentHTML('beforeend', modalHtml);
-}
-
-/**
- * Save API Key
- */
-function saveApiKey() {
-  const input = document.getElementById('api-key-input');
-  const key = input?.value?.trim();
-
-  if (key) {
-    ConfigManager.setApiKey(key);
-    console.log('API Key saved');
-  }
-
-  closeApiKeyModal();
-  renderApp();
-}
-
-/**
- * Close API Key modal
- */
-function closeApiKeyModal(event) {
-  if (event && event.target.id !== 'api-key-modal') return;
-  const modal = document.getElementById('api-key-modal');
-  if (modal) {
-    modal.remove();
   }
 }
 
@@ -1252,6 +1232,7 @@ async function startRecording() {
   renderApp();
   if (recordingPageId) {
     await PageService.update(recordingPageId, { status: 'recording' });
+    startSegmentSync(recordingPageId); // Start periodic sync
   }
 }
 
@@ -1271,6 +1252,7 @@ async function stopRecording() {
     speechService.stop();
     audioRecorder.stopVolumeMonitoring();
     stopRecognitionWatchdog();
+    stopSegmentSync(); // Stop periodic sync
     state.recognitionActive = false;
     updateRecognitionStatus();
 
@@ -1615,6 +1597,37 @@ function resetAudioCacheState() {
   state.audioCachedChunks = 0;
 }
 
+/**
+ * Start periodic segment sync to backend (every 30 seconds)
+ */
+function startSegmentSync(pageId) {
+  stopSegmentSync(); // Clear any existing interval
+  state.segmentSyncInterval = setInterval(async () => {
+    if (!state.isRecording || state.isStoppingRecording) {
+      stopSegmentSync();
+      return;
+    }
+    try {
+      const count = await SegmentService.syncToBackend(pageId);
+      if (count > 0) {
+        console.log(`[Sync] Synced ${count} segments to backend`);
+      }
+    } catch (e) {
+      console.warn('[Sync] Periodic sync failed:', e);
+    }
+  }, 10000); // 10 seconds
+}
+
+/**
+ * Stop periodic segment sync
+ */
+function stopSegmentSync() {
+  if (state.segmentSyncInterval) {
+    clearInterval(state.segmentSyncInterval);
+    state.segmentSyncInterval = null;
+  }
+}
+
 function enqueueAudioChunk(pageId, blob) {
   if (!pageId || !blob || blob.size === 0) return;
   state.audioCacheQueue.push({ pageId, blob, mimeType: blob.type || 'audio/webm' });
@@ -1824,6 +1837,19 @@ async function openPage(pageId) {
   state.pageSummary = null;    // Clear previous summary
   state.pageTodos = [];
   state.todosLoading = true;
+
+  // Check Gemini availability if not already done
+  if (!state.geminiAvailable && state.whisperAvailable) {
+    try {
+      const geminiRes = await fetch(`${getAPIBase()}/api/gemini/status`);
+      const geminiStatus = await geminiRes.json();
+      state.geminiAvailable = geminiStatus.available === true;
+      console.log(`Gemini AI: ${state.geminiAvailable ? '✅ Available' : '❌ Not configured'}`);
+    } catch (e) {
+      console.warn('Gemini status check failed:', e);
+    }
+  }
+
   renderApp();
 
   // Get available sources first

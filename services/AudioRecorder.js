@@ -7,6 +7,7 @@ export class AudioRecorderService {
     constructor() {
         this.mediaRecorder = null;
         this.audioChunks = [];
+        this.MAX_CHUNKS = 60; // Limit memory: keep ~60 chunks (1 minute at 1s timeslice)
         this.stream = null;
         this.isRecording = false;
         this.isPaused = false;
@@ -221,6 +222,13 @@ export class AudioRecorderService {
         this.mediaRecorder.ondataavailable = (event) => {
             if (event.data.size > 0) {
                 this.audioChunks.push(event.data);
+
+                // Memory optimization: trim old chunks if too many
+                // We keep the last MAX_CHUNKS for final blob assembly
+                if (this.audioChunks.length > this.MAX_CHUNKS) {
+                    // Discard oldest chunk
+                    this.audioChunks.shift();
+                }
 
                 if (this.onDataAvailable) {
                     this.onDataAvailable(event.data);

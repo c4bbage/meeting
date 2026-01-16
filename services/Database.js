@@ -262,16 +262,39 @@ export const SegmentService = {
    * @param {string} [source] - Optional source filter: 'web_speech' | 'whisper' | 'funasr'
    */
   async getFinalByPageId(pageId, source = null) {
-    let query = db.segments
+    // First check local IndexedDB
+    let segments = await db.segments
       .where('pageId')
       .equals(pageId)
-      .filter(seg => seg.isFinal);
+      .filter(seg => seg.isFinal)
+      .toArray();
 
-    if (source) {
-      query = query.filter(seg => seg.source === source);
+    // If no local segments, try to fetch from backend
+    if (segments.length === 0) {
+      const backendSegments = await SegmentSync.fetchByPageId(pageId);
+      if (backendSegments && backendSegments.length > 0) {
+        // Cache in local IndexedDB for future access
+        for (const seg of backendSegments) {
+          try {
+            await db.segments.put({
+              ...seg,
+              createdAt: new Date(seg.createdAt || Date.now())
+            });
+          } catch (e) {
+            // Ignore duplicate key errors
+          }
+        }
+        segments = backendSegments;
+      }
     }
 
-    return await query.sortBy('timestamp');
+    // Apply source filter
+    if (source) {
+      segments = segments.filter(seg => seg.source === source);
+    }
+
+    // Sort by timestamp
+    return segments.sort((a, b) => a.timestamp - b.timestamp);
   },
 
   /**
