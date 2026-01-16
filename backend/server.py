@@ -11,6 +11,7 @@ from typing import Optional, List, Dict, Any
 
 from .hotwords import get_hotword_manager, CATEGORIES
 from .storage import PageStorage, SegmentStorage
+from .transcription import get_transcription_service
 
 # ASR Engine selection via environment variable
 # Options: "whisper" (default), "funasr"
@@ -22,7 +23,6 @@ def get_asr_service():
         from .funasr_service import get_funasr_service
         return get_funasr_service()
     else:
-        from .transcription import get_transcription_service
         return get_transcription_service()
 
 app = FastAPI(
@@ -225,6 +225,8 @@ async def transcribe(
 
 # === Hotwords API ===
 
+# === Hotwords API ===
+
 class HotwordCreate(BaseModel):
     word: str
     category: str = "other"
@@ -266,6 +268,125 @@ async def delete_hotword(hotword_id: str):
     return {"success": True}
 
 
+# === WebSocket Streaming ===
+
+from fastapi import WebSocket, WebSocketDisconnect
+import asyncio
+from collections import deque
+
+async def _handle_transcribe_socket(websocket: WebSocket, language: str = "zh"):
+    """
+    WebSocket endpoint for real-time transcription.
+    Receives audio chunks (bytes) and returns incremental results.
+    """
+    await websocket.accept()
+    print(f"WebSocket connected (Engine: {ASR_ENGINE})")
+    
+    svc = get_asr_service()
+    chunk_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=3)
+    stop_event = asyncio.Event()
+    header_chunk = None
+    recent_chunks = deque(maxlen=6)
+
+    def _extract_text_and_confidence(result: Dict[str, Any]):
+        text = ""
+        confidence = None
+
+        if isinstance(result, dict):
+            if result.get("text"):
+                text = result.get("text", "")
+            elif result.get("segments"):
+                text = " ".join(seg.get("text", "").strip() for seg in result.get("segments", [])).strip()
+
+            probs = []
+            for seg in result.get("segments", []) or []:
+                for word in seg.get("words", []) or []:
+                    prob = word.get("probability")
+                    if prob is not None:
+                        probs.append(prob)
+            if probs:
+                confidence = round(sum(probs) / len(probs), 3)
+
+        return text.strip(), confidence
+
+    async def worker():
+        seq = 0
+        while not stop_event.is_set():
+            chunk = await chunk_queue.get()
+            if chunk is None:
+                break
+            seq += 1
+            try:
+                result = await asyncio.to_thread(
+                    svc.transcribe_bytes,
+                    chunk,
+                    f"stream_{seq}.webm",
+                    language=language
+                )
+                text, confidence = _extract_text_and_confidence(result or {})
+                if text:
+                    await websocket.send_json({
+                        "type": "result",
+                        "text": text,
+                        "is_final": True,
+                        "confidence": confidence,
+                        "engine": ASR_ENGINE,
+                        "seq": seq
+                    })
+            except Exception as e:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": str(e),
+                    "seq": seq
+                })
+
+    worker_task = asyncio.create_task(worker())
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if "bytes" in message and message["bytes"]:
+                data = message["bytes"]
+                if header_chunk is None:
+                    header_chunk = data
+                    continue
+                recent_chunks.append(data)
+
+                audio_bytes = header_chunk + b"".join(recent_chunks)
+                if chunk_queue.full():
+                    _ = chunk_queue.get_nowait()
+                await chunk_queue.put(audio_bytes)
+            elif "text" in message:
+                if message["text"] == "close":
+                    break
+    except WebSocketDisconnect:
+        print("WebSocket disconnected")
+    except Exception as e:
+        print(f"WebSocket connection error: {e}")
+    finally:
+        stop_event.set()
+        try:
+            await chunk_queue.put(None)
+        except Exception:
+            pass
+        try:
+            await worker_task
+        except Exception:
+            pass
+
+
+@app.websocket("/ws/transcribe")
+async def websocket_endpoint(websocket: WebSocket, language: str = "zh"):
+    await _handle_transcribe_socket(websocket, language)
+
+
+@app.websocket("/api/ws/transcribe")
+async def websocket_endpoint_api(websocket: WebSocket, language: str = "zh"):
+    await _handle_transcribe_socket(websocket, language)
+
+
+
+
 # === Gemini AI Analysis ===
 
 class AnalyzeRequest(BaseModel):
@@ -281,6 +402,27 @@ async def gemini_status():
         "available": service.is_available(),
         "model": service.model
     }
+
+
+@app.post("/api/preload")
+async def preload_models():
+    """Preload ASR models for faster first use."""
+    status = {}
+
+    try:
+        get_transcription_service()
+        status["whisper"] = "ready"
+    except Exception as e:
+        status["whisper"] = f"error: {e}"
+
+    try:
+        from .funasr_service import get_funasr_service
+        get_funasr_service()
+        status["funasr"] = "ready"
+    except Exception as e:
+        status["funasr"] = f"error: {e}"
+
+    return {"success": True, "status": status}
 
 
 @app.post("/api/analyze")
@@ -323,6 +465,19 @@ async def startup_event():
     print(f"Starting Meeting Transcription API with {ASR_ENGINE} engine...")
     # Pre-load the model (will download if needed on first run)
     get_asr_service()
+    # Preload both models for faster switching
+    try:
+        get_transcription_service()
+        print("✅ Whisper model preloaded")
+    except Exception as e:
+        print(f"⚠️ Whisper preload failed: {e}")
+
+    try:
+        from .funasr_service import get_funasr_service
+        get_funasr_service()
+        print("✅ FunASR model preloaded")
+    except Exception as e:
+        print(f"⚠️ FunASR preload failed: {e}")
     
     # Check Gemini status
     from .gemini_service import get_gemini_service

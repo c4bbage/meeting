@@ -17,6 +17,7 @@ dependencies = [
     "umap-learn>=0.5.0",
     "torch>=2.0.0",
     "torchaudio>=2.0.0",
+    "google-genai>=0.2.0",
 ]
 
 [project.optional-dependencies]

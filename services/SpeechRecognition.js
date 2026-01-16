@@ -30,10 +30,11 @@ export class SpeechRecognitionService {
         this.lastFinalTranscript = '';
         this.pendingInterim = '';
         this.lastResultTime = 0;
-        this.interimTimeout = null;
-
-        // 防止重复提交的去重机制
-        this.submittedTexts = new Set();
+        // 防止重复提交的去重机制（带时间窗口）
+        this.recentSubmissions = [];
+        this.duplicateWindowMs = 2500;
+        this.errorCooldownMs = 10000;
+        this.lastErrorTimes = {};
 
         // Callbacks
         this.onResult = null;       // (transcript, isFinal, confidence) => {}
@@ -63,20 +64,15 @@ export class SpeechRecognitionService {
     }
 
     /**
-     * 检查文本是否重复或包含在已提交的文本中
+     * 检查短时间内重复提交的文本
      */
     _isDuplicate(text) {
         const normalized = text.trim().toLowerCase();
-        if (this.submittedTexts.has(normalized)) {
-            return true;
-        }
-        // 检查是否是已提交文本的子串
-        for (const submitted of this.submittedTexts) {
-            if (submitted.includes(normalized) || normalized.includes(submitted)) {
-                return true;
-            }
-        }
-        return false;
+        const now = Date.now();
+        this.recentSubmissions = this.recentSubmissions.filter(
+            (entry) => now - entry.time < this.duplicateWindowMs
+        );
+        return this.recentSubmissions.some((entry) => entry.text === normalized);
     }
 
     /**
@@ -84,13 +80,39 @@ export class SpeechRecognitionService {
      */
     _markAsSubmitted(text) {
         const normalized = text.trim().toLowerCase();
-        this.submittedTexts.add(normalized);
+        this.recentSubmissions.push({ text: normalized, time: Date.now() });
 
         // 限制缓存大小，防止内存泄漏
-        if (this.submittedTexts.size > 100) {
-            const iterator = this.submittedTexts.values();
-            this.submittedTexts.delete(iterator.next().value);
+        if (this.recentSubmissions.length > 100) {
+            this.recentSubmissions.shift();
         }
+    }
+
+    /**
+     * 选择最佳识别候选（按置信度）
+     */
+    _selectBestAlternative(result) {
+        let best = result[0];
+        for (let i = 1; i < result.length; i++) {
+            const current = result[i];
+            if ((current.confidence || 0) > (best.confidence || 0)) {
+                best = current;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Throttle noisy errors (e.g., no-speech/network)
+     */
+    _shouldNotifyError(code) {
+        const now = Date.now();
+        const last = this.lastErrorTimes[code] || 0;
+        if (now - last < this.errorCooldownMs) {
+            return false;
+        }
+        this.lastErrorTimes[code] = now;
+        return true;
     }
 
     /**
@@ -103,30 +125,27 @@ export class SpeechRecognitionService {
 
             for (let i = event.resultIndex; i < event.results.length; i++) {
                 const result = event.results[i];
-                const transcript = result[0].transcript.trim();
+                const best = this._selectBestAlternative(result);
+                const transcript = best.transcript.trim();
                 const isFinal = result.isFinal;
-                const confidence = result[0].confidence || 0;
+                const confidence = best.confidence || 0;
 
                 if (!transcript) continue;
 
                 if (isFinal) {
-                    // 清除等待中的临时结果超时
-                    if (this.interimTimeout) {
-                        clearTimeout(this.interimTimeout);
-                        this.interimTimeout = null;
-                    }
+                    const isDuplicate = this._isDuplicate(transcript);
 
-                    // 避免重复提交
-                    if (!this._isDuplicate(transcript)) {
+                    if (!isDuplicate) {
                         this._markAsSubmitted(transcript);
                         this.lastFinalTranscript = transcript;
-                        this.lastInterimTranscript = '';
-                        this.pendingInterim = '';
 
                         if (this.onResult) {
                             this.onResult(transcript, true, confidence);
                         }
                     }
+
+                    this.lastInterimTranscript = '';
+                    this.pendingInterim = '';
                 } else {
                     // Interim result - 临时结果处理
                     this.lastInterimTranscript = transcript;
@@ -137,23 +156,6 @@ export class SpeechRecognitionService {
                         this.onResult(transcript, false, confidence);
                     }
 
-                    // 设置超时：如果临时结果长时间没有变成最终结果，强制提交
-                    // 这可以防止语速快时丢失内容
-                    if (this.interimTimeout) {
-                        clearTimeout(this.interimTimeout);
-                    }
-
-                    this.interimTimeout = setTimeout(() => {
-                        if (this.pendingInterim && !this._isDuplicate(this.pendingInterim)) {
-                            console.log('Forcing interim as final:', this.pendingInterim);
-                            this._markAsSubmitted(this.pendingInterim);
-
-                            if (this.onResult) {
-                                this.onResult(this.pendingInterim, true, 0.7);
-                            }
-                            this.pendingInterim = '';
-                        }
-                    }, 2000); // 2秒后强制提交临时结果
                 }
             }
         };
@@ -200,12 +202,20 @@ export class SpeechRecognitionService {
 
         // Handle errors
         this.recognition.onerror = (event) => {
-            console.error('Speech Recognition Error:', event.error);
+            const code = event.error;
+            if (code === 'no-speech') {
+                return;
+            }
+
+            const notify = this._shouldNotifyError(code);
+            if (notify) {
+                console.warn('Speech Recognition Error:', code);
+            }
 
             // Handle specific errors
-            switch (event.error) {
+            switch (code) {
                 case 'not-allowed':
-                    if (this.onError) {
+                    if (notify && this.onError) {
                         this.onError('麦克风权限被拒绝，请在浏览器设置中允许麦克风访问');
                     }
                     this.isRunning = false;
@@ -215,7 +225,7 @@ export class SpeechRecognitionService {
                     // 静音时自动重启以保持连接
                     break;
                 case 'network':
-                    if (this.onError) {
+                    if (notify && this.onError) {
                         this.onError('网络错误，请检查网络连接');
                     }
                     // 尝试重连
@@ -231,13 +241,13 @@ export class SpeechRecognitionService {
                     // User or system aborted, this is expected
                     break;
                 case 'audio-capture':
-                    if (this.onError) {
+                    if (notify && this.onError) {
                         this.onError('无法捕获音频，请检查麦克风是否正常工作');
                     }
                     break;
                 default:
-                    if (this.onError) {
-                        this.onError(`语音识别错误: ${event.error}`);
+                    if (notify && this.onError) {
+                        this.onError(`语音识别错误: ${code}`);
                     }
             }
         };
@@ -245,7 +255,7 @@ export class SpeechRecognitionService {
         // Handle start
         this.recognition.onstart = () => {
             // 重置去重缓存
-            this.submittedTexts.clear();
+            this.recentSubmissions = [];
 
             if (this.onStart) {
                 this.onStart();
@@ -286,13 +296,18 @@ export class SpeechRecognitionService {
             this.lastInterimTranscript = '';
             this.lastFinalTranscript = '';
             this.pendingInterim = '';
-            this.submittedTexts.clear();
+            this.recentSubmissions = [];
 
             this.isRunning = true;
             this.isPaused = false;
             this.recognition.start();
             return true;
         } catch (e) {
+            const isAlreadyStarted = e?.name === 'InvalidStateError' || /already started/i.test(e?.message || '');
+            if (isAlreadyStarted) {
+                this.isRunning = true;
+                return true;
+            }
             console.error('Failed to start speech recognition:', e);
             this.isRunning = false;
             if (this.onError) {
@@ -312,11 +327,6 @@ export class SpeechRecognitionService {
             if (this.onResult) {
                 this.onResult(this.pendingInterim, true, 0.6);
             }
-        }
-
-        if (this.interimTimeout) {
-            clearTimeout(this.interimTimeout);
-            this.interimTimeout = null;
         }
 
         this.isRunning = false;
@@ -381,15 +391,11 @@ export class SpeechRecognitionService {
     destroy() {
         this.stop();
 
-        if (this.interimTimeout) {
-            clearTimeout(this.interimTimeout);
-        }
-
         this.onResult = null;
         this.onError = null;
         this.onStart = null;
         this.onEnd = null;
-        this.submittedTexts.clear();
+        this.recentSubmissions = [];
     }
 }
 

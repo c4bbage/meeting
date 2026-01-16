@@ -4,12 +4,28 @@
  */
 
 // 动态获取 API 地址
-// 1. 如果在端口 3000 (默认开发端口)，API 指向端口 8000
-// 2. 如果在其他端口 (如 80/443 通过域名访问)，使用同源地址 (由 Caddy 代理)
+// 1. 本地静态服务器(如 8000)转发到后端 6543
+// 2. 通过 HTTPS (Caddy/域名)使用同源
+// 3. 其他开发端口也默认指向 6543
 const API_PORT = window.location.port;
-const API_BASE = (API_PORT === '3000')
-    ? `${window.location.protocol}//${window.location.hostname}:8000`
-    : window.location.origin;
+const IS_HTTPS = window.location.protocol === 'https:';
+let apiPort = API_PORT;
+
+if (API_PORT === '3000' || API_PORT === '3456') {
+    apiPort = '6543';
+} else if (API_PORT === '8000') {
+    apiPort = IS_HTTPS ? '8000' : '6543';
+} else if (API_PORT === '6543') {
+    apiPort = '6543';
+} else if (!API_PORT) {
+    apiPort = IS_HTTPS ? '' : '6543';
+} else {
+    apiPort = '6543';
+}
+
+const API_BASE = apiPort
+    ? `${window.location.protocol}//${window.location.hostname}:${apiPort}`
+    : `${window.location.protocol}//${window.location.hostname}`;
 
 export class WhisperAPI {
     constructor(baseUrl = API_BASE) {

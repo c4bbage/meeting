@@ -497,6 +497,12 @@ export const AudioService = {
     const chunks = await db.audioChunks.where('pageId').equals(pageId).toArray();
     if (chunks.length === 0) return null;
 
+    chunks.sort((a, b) => {
+      const timeA = new Date(a.createdAt || 0).getTime();
+      const timeB = new Date(b.createdAt || 0).getTime();
+      return timeA - timeB;
+    });
+
     // If multiple chunks, combine them (though we typically save one blob)
     if (chunks.length === 1) {
       return chunks[0];

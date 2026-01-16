@@ -34,43 +34,55 @@ A lightweight, privacy-focused meeting transcription tool that runs entirely in 
 
 ## 🚀 Quick Start
 
-### 1. 启动后端 (Python API)
+### 1. Prerequisites
 
-```bash
-cd /Users/cgy/wkgit/meeting
+- **Python 3.12+**
+- **uv** (Modern Python package manager)
+  - Install: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- **Caddy** (For domain access / local HTTPS)
+  - Install: `brew install caddy` (macOS) or see [Caddy Docs](https://caddyserver.com/docs/install)
+- **FFmpeg** (Recommended for audio processing)
+  - Install: `brew install ffmpeg`
 
-# 首次运行：创建虚拟环境并安装依赖
-uv venv --python 3.12
-source .venv/bin/activate
-uv pip install -r requirements.txt
+### 2. Setup & Run (Domain/LAN Mode)
 
-# 启动后端服务 (端口 8000)
-python -m uvicorn backend.server:app --host 0.0.0.0 --port 8000
+This is the recommended way to run the app, using Caddy to handle HTTPS and reverse proxying, which allows access from other devices on your network (like phones/tablets).
 
-# 开发模式（自动重载）
-python -m uvicorn backend.server:app --reload --port 8000
-```
+1.  **Configure Environment**:
+    ```bash
+    cp .env.example .env
+    # Edit .env and set your configurations (e.g., GEMINI_API_KEY)
+    ```
 
-验证后端运行：
-```bash
-curl http://localhost:8000/health
-# 返回: {"status":"ok","service":"meeting-transcription"}
-```
+2.  **Configure Caddy**:
+    ```bash
+    # Edit Caddyfile to set your domain or local hostname
+    nano Caddyfile
+    ```
 
-### 2. 启动前端 (HTTP 服务)
+3.  **Start Services**:
+    ```bash
+    ./start_domain.sh
+    ```
 
-```bash
-# 在另一个终端窗口
-cd /Users/cgy/wkgit/meeting
-source .venv/bin/activate
+    This script will:
+    - Auto-install Python dependencies via `uv`.
+    - Start the Backend (FastAPI) on port **6543**.
+    - Start the Frontend (serve) on port **3456**.
+    - Start Caddy (HTTPS Reverse Proxy) on port **8000**.
 
-# 启动静态文件服务 (端口 5500)
-python -m http.server 5500
-```
+4.  **Access**:
+    Open `https://<your-domain>:8000` (or `https://localhost:8000`).
+    > Note: You will need to accept the self-signed certificate warning.
 
-### 3. 访问应用
+### 3. Verification
 
-打开浏览器访问：**http://localhost:5500**
+- Backend Health: `curl http://localhost:8000/health`
+
+
+
+
+
 
 > ⚠️ **注意**: 必须通过 HTTP 服务器访问（不要直接打开 file://），否则 Web Speech API 和 ES Modules 无法正常工作。
 

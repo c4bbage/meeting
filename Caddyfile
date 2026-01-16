@@ -14,7 +14,11 @@
     handle /api/* {
         reverse_proxy localhost:6543
     }
-    
+
+    handle /ws/* {
+        reverse_proxy localhost:6543
+    }
+
     handle /docs {
         reverse_proxy localhost:6543
     }

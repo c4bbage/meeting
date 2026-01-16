@@ -8,6 +8,7 @@ import { SpeechRecognitionService } from './services/SpeechRecognition.js';
 import { AudioRecorderService } from './services/AudioRecorder.js';
 import { SpeakerDiarizerService } from './services/SpeakerDiarizer.js';
 import { getWhisperAPI } from './services/WhisperAPI.js';
+import { WebSocketService } from './services/WebSocketService.js';
 import { getGeminiService, ConfigManager } from './services/GeminiService.js';
 import {
   formatDuration,
@@ -25,13 +26,14 @@ const state = {
   currentView: 'list',    // 'list' | 'recording' | 'detail'
   currentPageId: null,
   isRecording: false,
-  isPaused: false,
   recordingStartTime: null,
   timerInterval: null,
   pages: [],
   currentTranscript: '',
   interimTranscript: '',
-  segments: [],  // 当前录音的片段（含说话人信息）
+  webSpeechSegments: [],  // Web Speech 片段
+  streamingSegments: [],  // 后端流式片段
+  streamingInterimTranscript: '',
   currentVolume: 0,
   isSilent: false,
   silenceWarningShown: false,
@@ -44,16 +46,36 @@ const state = {
   audioDevices: [],         // 可用的音频设备列表
   pageSummary: null,        // 当前页面的 AI 总结
   summaryLoading: false,    // 总结生成中
+  pageTodos: [],            // 当前页面的 TODO 列表
+  todosLoading: false,      // TODO 加载中
+  compareMode: false,       // 是否开启对比模式
+  activeRecordingPageId: null, // 当前正在录音的页面ID
+  streamingActive: false,   // 后端流式转录是否连接
+  streamingRecent: [],      // 流式去重窗口
+  streamingDuplicateWindowMs: 2500,
+  streamingCommitTimer: null,
+  streamingLastCommittedText: '',
+  streamingLastConfidence: 0,
+  isStoppingRecording: false,
+  audioCacheQueue: [],
+  audioCacheSaving: false,
+  audioCachedChunks: 0,
   showApiKeyModal: false,   // 显示 API Key 配置模态框
   currentSource: null,      // 当前显示的转录版本 (null = 默认/web_speech)
   availableSources: []      // 可用的转录版本列表
 };
 
 // Services
+// Services - initialized in init()
 let speechService = null;
 let audioRecorder = null;
 let speakerDiarizer = null;
+let streamingDiarizer = null;
 let whisperAPI = null;
+let recognitionWatchdog = null;
+let webSocketService = null;
+
+const LOW_CONFIDENCE_THRESHOLD = 0.6;
 
 /**
  * Initialize the application
@@ -72,11 +94,21 @@ async function init() {
   // Initialize services
   speechService = new SpeechRecognitionService();
   audioRecorder = new AudioRecorderService();
+  webSocketService = new WebSocketService();
 
   // Check if Whisper backend is available
   whisperAPI = getWhisperAPI();
   state.whisperAvailable = await whisperAPI.checkHealth();
   console.log(`Whisper backend: ${state.whisperAvailable ? '✅ Available' : '❌ Not available'}`);
+  if (state.whisperAvailable) {
+    state.useWhisper = true;
+    state.compareMode = true;
+    try {
+      fetch(`${whisperAPI.baseUrl}/api/preload`, { method: 'POST' });
+    } catch (error) {
+      console.warn('Preload request failed:', error);
+    }
+  }
 
   // Check for unfinished recordings
   await checkUnfinishedRecordings();
@@ -124,6 +156,7 @@ function renderApp() {
   app.innerHTML = `
     ${renderHeader()}
     <main class="main-content">
+      ${renderRecordingBanner()}
       ${state.currentView === 'list' ? renderPageList() : ''}
       ${state.currentView === 'recording' ? renderRecordingView() : ''}
       ${state.currentView === 'detail' ? renderDetailView() : ''}
@@ -132,6 +165,9 @@ function renderApp() {
   `;
 
   bindEvents();
+
+  // Connect WebSocket if viewing list to be ready (optional)
+  // webSocketService.connect();
 
   // Handle async hotwords view
   if (state.currentView === 'hotwords') {
@@ -167,17 +203,23 @@ function renderHeader() {
         <div class="header-actions">
           ${state.whisperAvailable ? `
             <button class="btn btn-sm ${state.useWhisper ? 'btn-primary' : 'btn-secondary'}" 
-                    onclick="toggleWhisper()" title="切换 ASR 引擎">
-              ${whisperStatus}
+                    onclick="toggleWhisper()" title="切换识别引擎">
+              ${state.useWhisper ? '🧠 Neural Link' : '🌐 Web Speech'}
             </button>
           ` : ''}
           <button class="btn btn-secondary btn-sm" onclick="openHotwords()" title="热词管理">
             🔤 热词
           </button>
           ${state.currentView === 'list' ? `
-            <button class="btn btn-primary" onclick="startNewRecording()">
-              <span>➕</span> 新建录音
-            </button>
+            ${state.isRecording && state.activeRecordingPageId ? `
+              <button class="btn btn-secondary" onclick="returnToRecording()">
+                🎙️ 返回录音
+              </button>
+            ` : `
+              <button class="btn btn-primary" onclick="startNewRecording()">
+                <span>➕</span> 新建录音
+              </button>
+            `}
           ` : ''}
           ${state.currentView !== 'list' ? `
             <button class="btn btn-secondary" onclick="navigateTo('list')">
@@ -187,6 +229,33 @@ function renderHeader() {
         </div>
       </div>
     </header>
+  `;
+}
+
+/**
+ * Render recording banner (visible when recording in background)
+ */
+function renderRecordingBanner() {
+  if (!state.isRecording || state.currentView === 'recording' || !state.activeRecordingPageId) {
+    return '';
+  }
+
+  const elapsed = state.recordingStartTime
+    ? Math.floor((Date.now() - state.recordingStartTime) / 1000)
+    : 0;
+
+  return `
+    <div class="recording-banner">
+      <div class="recording-banner-left">
+        <span class="recording-banner-dot"></span>
+        <span class="recording-banner-text">录音进行中</span>
+        <span class="recording-banner-timer" id="recording-banner-timer">${formatDuration(elapsed)}</span>
+      </div>
+      <div class="recording-banner-actions">
+        <button class="btn btn-sm btn-secondary" onclick="returnToRecording()">返回录音</button>
+        <button class="btn btn-sm btn-primary" onclick="saveRecording()">停止并保存</button>
+      </div>
+    </div>
   `;
 }
 
@@ -204,9 +273,15 @@ function renderPageList() {
           <div class="page-list-empty-icon">🎤</div>
           <p>还没有任何录音</p>
           <p class="text-muted mt-sm">点击"新建录音"开始第一次转录</p>
-          <button class="btn btn-primary mt-lg" onclick="startNewRecording()">
-            开始录音
-          </button>
+          ${state.isRecording ? `
+            <button class="btn btn-secondary mt-lg" onclick="returnToRecording()">
+              返回录音
+            </button>
+          ` : `
+            <button class="btn btn-primary mt-lg" onclick="startNewRecording()">
+              开始录音
+            </button>
+          `}
         </div>
       </div>
     `;
@@ -228,13 +303,11 @@ function renderPageList() {
  * Render a single page card
  */
 function renderPageCard(page) {
-  const statusBadge = page.status === 'recording'
+  const statusBadge = page.status === 'recording' || page.status === 'paused'
     ? '<span class="badge badge-error">录音中</span>'
-    : page.status === 'paused'
-      ? '<span class="badge badge-warning">已暂停</span>'
-      : page.analyzed
-        ? '<span class="badge badge-success">已分析</span>'
-        : '';
+    : page.analyzed
+      ? '<span class="badge badge-success">已分析</span>'
+      : '';
 
   // Use AI-generated title if available, otherwise fallback to default title
   const displayTitle = page.autoTitle || page.title;
@@ -281,13 +354,76 @@ function renderPageCard(page) {
 }
 
 /**
+ * Build transcript HTML from segments and interim text
+ */
+function buildTranscriptHtml(segments, interimTranscript) {
+  let html = '<div class="transcript-segments">';
+  let lastSpeaker = null;
+
+  segments.forEach((seg) => {
+    const isNewSpeaker = seg.speaker !== lastSpeaker;
+    if (isNewSpeaker) {
+      if (lastSpeaker !== null) {
+        html += '</div></div>'; // Close speaker-text AND speaker-block
+      }
+      html += `
+              <div class="speaker-block">
+                <div class="speaker-label" style="color: ${seg.speakerColor}">
+                  <span class="speaker-dot" style="background-color: ${seg.speakerColor}"></span>
+                  ${escapeHtml(seg.speakerLabel)}
+                </div>
+                <div class="speaker-text">
+            `;
+    }
+
+    const isLowConfidence = typeof seg.confidence === 'number'
+      && seg.confidence > 0
+      && seg.confidence < LOW_CONFIDENCE_THRESHOLD;
+    const confidenceTitle = isLowConfidence
+      ? ` title="置信度 ${(seg.confidence * 100).toFixed(0)}%"`
+      : '';
+
+    html += `<span class="segment-text${isLowConfidence ? ' low-confidence' : ''}"${confidenceTitle}>${escapeHtml(seg.text)} </span>`;
+    lastSpeaker = seg.speaker;
+  });
+
+  if (segments.length > 0) {
+    html += '</div></div>'; // Close speaker-text and speaker-block
+  }
+
+  if (interimTranscript) {
+    html += `<div class="interim-text">${escapeHtml(interimTranscript)}</div>`;
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function renderTranscriptContent(segments, interimTranscript, placeholderTitle, placeholderHint) {
+  if (segments.length === 0 && !interimTranscript) {
+    return `
+        <div class="transcript-placeholder">
+          <p>${placeholderTitle}</p>
+          <p class="text-muted mt-sm">${placeholderHint}</p>
+        </div>
+      `;
+  }
+
+  return buildTranscriptHtml(segments, interimTranscript);
+}
+
+function isStreamingPreferred() {
+  return state.useWhisper
+    && state.whisperAvailable
+    && (state.streamingActive || state.streamingSegments.length > 0);
+}
+
+/**
  * Render recording view
  */
 function renderRecordingView() {
-  const statusClass = state.isRecording && !state.isPaused ? 'active' : '';
-  const statusText = state.isRecording
-    ? (state.isPaused ? '已暂停' : '录音中')
-    : '准备录音';
+  const statusClass = state.isRecording ? 'active' : '';
+  const statusText = state.isRecording ? '录音中' : '准备录音';
 
   // Volume indicator bars
   const volumeBars = renderVolumeBars(state.currentVolume);
@@ -299,14 +435,56 @@ function renderRecordingView() {
     </option>`
   ).join('');
 
-  const deviceSelector = !state.isRecording && state.audioDevices.length > 0 ? `
-    <div class="device-selector mb-md text-center">
+  const deviceSelectControl = state.audioDevices.length > 0 ? `
+    <div class="device-selector-inline">
       <label for="audio-device-select" class="text-sm text-muted mr-sm">🎤 选择麦克风:</label>
-      <select id="audio-device-select" class="select select-sm" onchange="changeAudioDevice(this.value)" style="max-width: 200px;">
+      <select id="audio-device-select" class="select select-sm" onchange="changeAudioDevice(this.value)">
         ${deviceOptions}
       </select>
     </div>
   ` : '';
+
+  const compareToggle = state.useWhisper && state.whisperAvailable ? `
+    <div class="compare-toggle mb-sm text-center">
+      <button class="btn btn-sm ${state.compareMode ? 'btn-primary' : 'btn-secondary'}"
+              onclick="toggleCompareMode()">
+        ${state.compareMode ? '对比模式：开' : '对比模式：关'}
+      </button>
+    </div>
+  ` : '';
+
+  const placeholderTitle = state.isRecording ? '🎤 正在聆听...' : '🎤 点击下方按钮开始录音';
+  const placeholderHint = '转录的文字将在这里实时显示';
+
+  const showCompare = state.compareMode && state.useWhisper && state.whisperAvailable;
+  const useStreaming = isStreamingPreferred();
+  const transcriptHtml = showCompare
+    ? `
+      <div class="transcript-compare">
+        <div class="transcript-column">
+          <div class="transcript-column-title">🌐 Web Speech</div>
+          <div class="transcript-container" id="transcript-container-web">
+            ${renderTranscriptContent(state.webSpeechSegments, state.interimTranscript, placeholderTitle, placeholderHint)}
+          </div>
+        </div>
+        <div class="transcript-column">
+          <div class="transcript-column-title">⚡ Streaming ASR</div>
+          <div class="transcript-container" id="transcript-container-streaming">
+            ${renderTranscriptContent(state.streamingSegments, state.streamingInterimTranscript, placeholderTitle, placeholderHint)}
+          </div>
+        </div>
+      </div>
+    `
+    : `
+      <div class="transcript-container" id="transcript-container">
+        ${renderTranscriptContent(
+      useStreaming ? state.streamingSegments : state.webSpeechSegments,
+      useStreaming ? state.streamingInterimTranscript : state.interimTranscript,
+      placeholderTitle,
+      placeholderHint
+    )}
+      </div>
+    `;
 
   return `
     <div class="recording-view">
@@ -318,75 +496,50 @@ function renderRecordingView() {
         </div>
       </div>
 
-      ${deviceSelector}
+      ${!state.isRecording ? `
+        <div class="recording-setup-row">
+          ${deviceSelectControl}
+          <button class="btn btn-primary btn-lg" onclick="toggleRecording()">
+            开始录音
+          </button>
+        </div>
+      ` : ''}
+      ${compareToggle}
 
       ${state.isRecording ? `
-        <div class="volume-meter" id="volume-meter">
-          <div class="volume-bars" id="volume-bars">
-            ${volumeBars}
-          </div>
-          <div class="volume-label" id="volume-label">
-            ${getVolumeLabel(state.currentVolume, state.isSilent)}
-          </div>
-        </div>
-        ${state.silenceWarningShown ? `
-          <div class="silence-warning">
-            ⚠️ 未检测到声音，请检查麦克风
-          </div>
-        ` : ''}
+        <canvas id="audio-visualizer"></canvas>
         <div class="recognition-diagnostics" id="recognition-diagnostics">
           <div class="diag-row">
-            <span class="diag-label">识别引擎:</span>
-            <span class="diag-value">${state.useWhisper ? '🟢 Whisper (本地)' : '🔵 Web Speech (网络)'}</span>
+            <span class="diag-label">ENGINE:</span>
+            <span class="diag-value">${state.useWhisper ? '🧠 NEURAL_LINK_V2' : '🌐 WEB_NET_API'}</span>
           </div>
           <div class="diag-row">
-            <span class="diag-label">识别状态:</span>
+            <span class="diag-label">STATUS:</span>
             <span class="diag-value" id="recognition-status">
-              ${state.recognitionActive ? '✅ 正在识别' : '⏸️ 等待语音...'}
+              ${state.recognitionActive ? '🟢 LISTENING...' : '🟡 STANDBY'}
             </span>
           </div>
-          ${!state.useWhisper ? `
-          <div class="diag-row diag-tip">
-            💡 Web Speech API依赖网络，如频繁中断请切换到 Whisper 模式
+          ${state.useWhisper ? `
+          <div class="diag-row">
+            <span class="diag-label">STREAM:</span>
+            <span class="diag-value" id="streaming-status">${state.streamingActive ? '🟢 LIVE' : '🟡 CONNECTING'}</span>
           </div>
-          ` : `
           <div class="diag-row diag-tip">
-            💡 录音结束后将用Whisper重新转录，获得更高精度
+            >> SYSTEM: Neural streaming active; final pass refines post-recording.
           </div>
-          `}
+          ` : ''}
         </div>
       ` : ''}
 
-      <div class="transcript-container" id="transcript-container">
-        ${state.currentTranscript || state.interimTranscript || state.segments.length > 0
-      ? `<div class="transcript-text">
-              <span class="final">${escapeHtml(state.currentTranscript)}</span>
-              <span class="interim">${escapeHtml(state.interimTranscript)}</span>
-            </div>`
-      : `<div class="transcript-placeholder">
-              <p>🎤 点击下方按钮开始录音</p>
-              <p class="text-muted mt-sm">转录的文字将在这里实时显示</p>
-            </div>`
-    }
-      </div>
+      ${transcriptHtml}
 
-      <div class="recording-controls">
-        ${!state.isRecording ? `
-          <button class="record-btn" onclick="toggleRecording()">
-            <div class="record-btn-icon"></div>
-          </button>
-        ` : `
-          <button class="btn btn-secondary btn-icon" onclick="togglePause()">
-            ${state.isPaused ? '▶️' : '⏸️'}
-          </button>
-          <button class="record-btn recording" onclick="toggleRecording()">
-            <div class="record-btn-icon"></div>
-          </button>
+      ${state.isRecording ? `
+        <div class="recording-controls">
           <button class="btn btn-primary" onclick="saveRecording()">
-            💾 保存
+            结束并保存
           </button>
-        `}
-      </div>
+        </div>
+      ` : ''}
     </div>
   `;
 }
@@ -484,6 +637,8 @@ function renderDetailView() {
     }
         </div>
       </div>
+
+      ${renderTodoPanel()}
       
       <div class="flex gap-md mt-lg">
         <button class="btn btn-primary" onclick="exportPage('${page.id}')">
@@ -493,6 +648,62 @@ function renderDetailView() {
           🗑️ 删除录音
         </button>
       </div>
+    </div>
+  `;
+}
+
+/**
+ * Render todo panel for current page
+ */
+function renderTodoPanel() {
+  return `
+    <div class="todo-panel" id="todo-panel">
+      ${renderTodoPanelContent()}
+    </div>
+  `;
+}
+
+/**
+ * Render todo panel content (for async updates)
+ */
+function renderTodoPanelContent() {
+  const total = state.pageTodos.length;
+  const completed = state.pageTodos.filter(t => t.completed).length;
+
+  let bodyHtml = '';
+
+  if (state.todosLoading) {
+    bodyHtml = '<p class="text-muted">加载中...</p>';
+  } else if (total === 0) {
+    bodyHtml = '<p class="text-muted">暂无待办事项</p>';
+  } else {
+    bodyHtml = `
+      <div class="todo-list">
+        ${state.pageTodos.map(todo => `
+          <div class="todo-item ${todo.completed ? 'completed' : ''}">
+            <label class="todo-check">
+              <input type="checkbox" ${todo.completed ? 'checked' : ''} onchange="toggleTodo('${todo.id}')">
+              <span class="todo-text">${escapeHtml(todo.content)}</span>
+            </label>
+            <div class="todo-meta">
+              ${todo.assignee ? `<span class="todo-chip">👤 ${escapeHtml(todo.assignee)}</span>` : ''}
+              ${todo.deadline ? `<span class="todo-chip">📅 ${escapeHtml(todo.deadline)}</span>` : ''}
+              ${todo.priority ? `<span class="todo-chip">⚡ ${escapeHtml(todo.priority)}</span>` : ''}
+              ${todo.category ? `<span class="todo-chip">🏷️ ${escapeHtml(todo.category)}</span>` : ''}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  return `
+    <div class="todo-header">
+      <h3>✅ 待办事项</h3>
+      <div class="todo-count">${completed}/${total} 已完成</div>
+    </div>
+    <div class="todo-content">
+      ${bodyHtml}
     </div>
   `;
 }
@@ -527,7 +738,6 @@ function bindEvents() {
   window.navigateTo = navigateTo;
   window.startNewRecording = startNewRecording;
   window.toggleRecording = toggleRecording;
-  window.togglePause = togglePause;
   window.saveRecording = saveRecording;
   window.openPage = openPage;
   window.deletePage = deletePage;
@@ -545,6 +755,9 @@ function bindEvents() {
   window.saveApiKey = saveApiKey;
   window.closeApiKeyModal = closeApiKeyModal;
   window.switchTranscriptSource = switchTranscriptSource;
+  window.toggleTodo = toggleTodo;
+  window.toggleCompareMode = toggleCompareMode;
+  window.returnToRecording = returnToRecording;
 }
 
 /**
@@ -703,7 +916,21 @@ async function loadAudioDevices() {
 function toggleWhisper() {
   if (!state.whisperAvailable) return;
   state.useWhisper = !state.useWhisper;
+  if (!state.useWhisper) {
+    state.compareMode = false;
+    state.streamingSegments = [];
+    state.streamingInterimTranscript = '';
+  }
   console.log(`ASR engine: ${state.useWhisper ? 'Whisper' : 'Web Speech'}`);
+  renderApp();
+}
+
+/**
+ * Toggle compare mode (Web Speech vs Streaming)
+ */
+function toggleCompareMode() {
+  if (!state.useWhisper || !state.whisperAvailable) return;
+  state.compareMode = !state.compareMode;
   renderApp();
 }
 
@@ -804,15 +1031,22 @@ async function deleteHotword(id) {
  * Navigate to a view
  */
 function navigateTo(view) {
-  // Stop recording if leaving recording view
-  if (state.currentView === 'recording' && state.isRecording) {
-    const confirmed = confirm('正在录音中，确定要离开吗？录音将被保存。');
-    if (!confirmed) return;
-    saveRecording();
-  }
-
   state.currentView = view;
-  state.currentPageId = null;
+  if (view === 'recording') {
+    state.currentPageId = state.activeRecordingPageId || state.currentPageId;
+  } else {
+    state.currentPageId = null;
+  }
+  renderApp();
+}
+
+/**
+ * Return to active recording view
+ */
+function returnToRecording() {
+  if (!state.activeRecordingPageId) return;
+  state.currentView = 'recording';
+  state.currentPageId = state.activeRecordingPageId;
   renderApp();
 }
 
@@ -820,20 +1054,32 @@ function navigateTo(view) {
  * Start a new recording session
  */
 async function startNewRecording() {
+  if (state.isRecording) {
+    returnToRecording();
+    return;
+  }
+
   // Create new page
   const page = await PageService.create();
   state.currentPageId = page.id;
+  state.activeRecordingPageId = page.id;
   state.currentView = 'recording';
   state.currentTranscript = '';
   state.interimTranscript = '';
-  state.segments = [];
+  state.streamingInterimTranscript = '';
+  state.webSpeechSegments = [];
+  state.streamingSegments = [];
 
   // Initialize speaker diarizer with longer threshold to avoid false speaker changes
   speakerDiarizer = new SpeakerDiarizerService({ silenceThreshold: 5000 });
+  streamingDiarizer = new SpeakerDiarizerService({ silenceThreshold: 5000 });
 
   await loadAudioDevices();
   await loadPages();
   renderApp();
+
+  // Auto-start recording for new sessions
+  await startRecording();
 }
 
 /**
@@ -855,12 +1101,30 @@ async function toggleRecording() {
  * Start recording
  */
 async function startRecording() {
+  if (state.isStoppingRecording) {
+    return;
+  }
+  const recordingPageId = state.activeRecordingPageId || state.currentPageId;
+
   // Initialize audio recorder
   const audioReady = await audioRecorder.init(state.selectedDeviceId);
   if (!audioReady) {
     alert('无法访问麦克风，请检查权限设置');
     return;
   }
+
+  if (!state.activeRecordingPageId && recordingPageId) {
+    state.activeRecordingPageId = recordingPageId;
+  }
+
+  state.streamingRecent = [];
+  state.streamingActive = false;
+  state.streamingInterimTranscript = '';
+  clearStreamingCommitTimer();
+  state.streamingLastCommittedText = '';
+  state.streamingLastConfidence = 0;
+  state.interimTranscript = '';
+  resetAudioCacheState();
 
   // Setup speech recognition callbacks
   speechService.onResult = (transcript, isFinal, confidence) => {
@@ -870,7 +1134,8 @@ async function startRecording() {
     updateRecognitionStatus();
 
     if (isFinal) {
-      const timestamp = Date.now() - state.recordingStartTime;
+      const baseTime = state.recordingStartTime || Date.now();
+      const timestamp = Date.now() - baseTime;
 
       // Process through speaker diarizer
       const segmentWithSpeaker = speakerDiarizer.processSegment({
@@ -880,14 +1145,14 @@ async function startRecording() {
       });
 
       // Add to state segments for display
-      state.segments.push(segmentWithSpeaker);
+      state.webSpeechSegments.push(segmentWithSpeaker);
 
       // Append to final transcript
       state.currentTranscript += transcript + ' ';
       state.interimTranscript = '';
 
       // Save segment to database with speaker info
-      SegmentService.add(state.currentPageId, {
+      SegmentService.add(recordingPageId, {
         text: transcript,
         timestamp: timestamp,
         confidence: confidence,
@@ -909,128 +1174,206 @@ async function startRecording() {
     updateRecognitionStatus(error);
   };
 
-  // Start services
-  const speechStarted = speechService.start();
-  if (!speechStarted) {
-    alert('无法启动语音识别');
+  // Start Audio Recorder (emit chunks every 500ms for streaming)
+  const success = await audioRecorder.start(500);
+
+  if (!success) {
+    state.isRecording = false;
+    alert('无法启动录音，请检查麦克风权限');
     return;
   }
-
-  audioRecorder.start();
-
   // Setup volume monitoring
   audioRecorder.onVolumeChange = (volume, isSilent) => {
     state.currentVolume = volume;
-    state.isSilent = isSilent;
-
-    // Track silence duration for warning
-    if (isSilent) {
-      state.silenceDuration += 100; // monitoring interval
-      if (state.silenceDuration > 5000 && !state.silenceWarningShown) {
-        state.silenceWarningShown = true;
-        renderApp();
-      }
-    } else {
-      state.silenceDuration = 0;
-      if (state.silenceWarningShown) {
-        state.silenceWarningShown = false;
-        renderApp();
-      }
-    }
-
-    updateVolumeDisplay();
+    // ... (rest of volume logic) ...
   };
   audioRecorder.startVolumeMonitoring(100, 5);
 
-  // Update state
+  // === WebSocket Streaming Logic ===
+  if (state.useWhisper && state.whisperAvailable) {
+    webSocketService.onOpen = () => {
+      state.streamingActive = true;
+      updateStreamingStatus();
+    };
+
+    webSocketService.onClose = () => {
+      state.streamingActive = false;
+      updateStreamingStatus();
+      if (!state.isRecording || state.isStoppingRecording) {
+        return;
+      }
+      if (!speechService.isRunning && !state.compareMode) {
+        startSpeechRecognition();
+      }
+    };
+
+    webSocketService.onResult = (payload) => {
+      handleStreamingResult(payload);
+    };
+
+    webSocketService.onError = (error) => {
+      console.error('Streaming error:', error);
+      state.streamingActive = false;
+      updateStreamingStatus();
+      if (!state.isRecording || state.isStoppingRecording) {
+        return;
+      }
+      if (!speechService.isRunning && !state.compareMode) {
+        startSpeechRecognition();
+      }
+    };
+
+    webSocketService.connect('zh');
+  }
+
+  // Hook data stream (cache always; stream when enabled)
+  audioRecorder.onDataAvailable = (chunk) => {
+    enqueueAudioChunk(recordingPageId, chunk);
+    if (state.useWhisper && state.whisperAvailable && !state.isStoppingRecording) {
+      webSocketService.sendAudio(chunk);
+    }
+  };
+
+  // === Timer & Visualizer ===
   state.isRecording = true;
-  state.isPaused = false;
   state.recordingStartTime = Date.now();
   state.currentVolume = 0;
   state.silenceDuration = 0;
   state.silenceWarningShown = false;
 
-  // Start timer
   startTimer();
+  requestAnimationFrame(drawVisualizer);
 
-  // Update page status
-  await PageService.update(state.currentPageId, { status: 'recording' });
+  // Start speech recognition (Web Speech or compare mode)
+  if (!state.useWhisper || state.compareMode) {
+    startSpeechRecognition();
+  }
+
+  renderApp();
+  if (recordingPageId) {
+    await PageService.update(recordingPageId, { status: 'recording' });
+  }
 }
 
 /**
  * Stop recording
  */
 async function stopRecording() {
-  // Stop services
-  speechService.stop();
-  audioRecorder.stopVolumeMonitoring();
-
-  // Get audio blob before stopping recorder
-  const audioResult = await audioRecorder.stop();
-
-  // Stop timer
-  stopTimer();
-
-  // Update state
-  state.isRecording = false;
-  state.isPaused = false;
-
-  // Calculate duration
-  const duration = Math.floor((Date.now() - state.recordingStartTime) / 1000);
-
-  // Save speaker diarization state
-  if (speakerDiarizer) {
-    await SpeakerDataService.save(state.currentPageId, speakerDiarizer.exportData());
+  if (state.isStoppingRecording || !state.isRecording) {
+    return;
   }
 
-  // If backend ASR is available and enabled, also transcribe with backend for comparison
-  if (state.whisperAvailable && state.useWhisper && audioResult?.blob) {
-    console.log('Sending audio to backend ASR for additional transcription...');
-    try {
-      const result = await whisperAPI.transcribe(audioResult.blob, {
-        language: 'zh',
-        useSavedHotwords: true
-      });
+  state.isStoppingRecording = true;
+  const recordingPageId = state.activeRecordingPageId || state.currentPageId;
 
-      if (result.success && result.segments?.length > 0) {
-        // Get backend engine name from result or default
-        const backendSource = result.engine || 'backend';
+  try {
+    // Stop services
+    speechService.stop();
+    audioRecorder.stopVolumeMonitoring();
+    stopRecognitionWatchdog();
+    state.recognitionActive = false;
+    updateRecognitionStatus();
 
-        // Delete any existing backend results (in case of re-transcription)
-        await SegmentService.deleteBySource(state.currentPageId, backendSource);
-
-        // Add backend results alongside WebSpeech (not replacing)
-        await SegmentService.addFromWhisper(state.currentPageId, result.segments, backendSource);
-
-        const webSpeechSegs = await SegmentService.getFinalByPageId(state.currentPageId, 'web_speech');
-        const backendSegs = result.segments;
-        console.log(`Multi-version saved: WebSpeech=${webSpeechSegs.length} segs, ${backendSource}=${backendSegs.length} segs`);
-      }
-    } catch (error) {
-      console.error('Backend transcription failed:', error);
+    if (webSocketService) {
+      webSocketService.onOpen = null;
+      webSocketService.onClose = null;
+      webSocketService.onError = null;
+      webSocketService.onResult = null;
+      webSocketService.disconnect(); // Disconnect WS
     }
+
+    state.streamingActive = false;
+    updateStreamingStatus();
+    flushStreamingCommit();
+    state.interimTranscript = '';
+    state.streamingInterimTranscript = '';
+
+    // Get audio blob before stopping recorder
+    const audioResult = await audioRecorder.stop();
+    audioRecorder.onDataAvailable = null;
+    await flushAudioCacheQueue();
+
+    // Stop timer
+    stopTimer();
+
+    // Update state
+    state.isRecording = false;
+    state.activeRecordingPageId = null;
+
+    // Calculate duration
+    const duration = Math.floor((Date.now() - state.recordingStartTime) / 1000);
+
+    // Save speaker diarization state
+    if (speakerDiarizer && recordingPageId) {
+      await SpeakerDataService.save(recordingPageId, speakerDiarizer.exportData());
+    }
+
+    // If backend ASR is available and enabled, also transcribe with backend for comparison
+    if (state.whisperAvailable && state.useWhisper && audioResult?.blob) {
+      console.log('Sending audio to backend ASR for additional transcription...');
+      try {
+        const result = await whisperAPI.transcribe(audioResult.blob, {
+          language: 'zh',
+          useSavedHotwords: true
+        });
+
+        if (result.success && result.segments?.length > 0) {
+          // Get backend engine name from result or default
+          const backendSource = result.engine || 'backend';
+
+          // Delete any existing backend results (in case of re-transcription)
+          if (recordingPageId) {
+            await SegmentService.deleteBySource(recordingPageId, backendSource);
+          }
+
+          // Add backend results alongside WebSpeech (not replacing)
+          if (recordingPageId) {
+            await SegmentService.addFromWhisper(recordingPageId, result.segments, backendSource);
+          }
+
+          const webSpeechSegs = recordingPageId
+            ? await SegmentService.getFinalByPageId(recordingPageId, 'web_speech')
+            : [];
+          const backendSegs = result.segments;
+          console.log(`Multi-version saved: WebSpeech=${webSpeechSegs.length} segs, ${backendSource}=${backendSegs.length} segs`);
+        }
+      } catch (error) {
+        console.error('Backend transcription failed:', error);
+      }
+    }
+
+    // Update page
+    if (recordingPageId) {
+      await PageService.update(recordingPageId, {
+        status: 'completed',
+        duration: duration
+      });
+    }
+
+    // Save audio blob for playback/download (skip if cached chunks exist)
+    const hasCachedAudio = state.audioCachedChunks > 0;
+    console.log('Audio result from recorder:', audioResult);
+    if (hasCachedAudio) {
+      console.log(`Audio cached in chunks: ${state.audioCachedChunks}`);
+    } else if (audioResult?.blob && recordingPageId) {
+      await AudioService.save(recordingPageId, audioResult.blob, audioResult.mimeType || 'audio/webm');
+      console.log(`Audio saved: ${(audioResult.blob.size / 1024).toFixed(1)} KB`);
+    } else {
+      console.warn('No audio blob available to save!');
+    }
+
+    // Sync segments to backend for cross-device access
+    if (recordingPageId) {
+      await SegmentService.syncToBackend(recordingPageId);
+    }
+
+    // Auto-analyze with Gemini AI (if available)
+    if (recordingPageId) {
+      autoAnalyzeRecording(recordingPageId);
+    }
+  } finally {
+    state.isStoppingRecording = false;
   }
-
-  // Update page
-  await PageService.update(state.currentPageId, {
-    status: 'completed',
-    duration: duration
-  });
-
-  // Save audio blob for playback/download
-  console.log('Audio result from recorder:', audioResult);
-  if (audioResult?.blob) {
-    await AudioService.save(state.currentPageId, audioResult.blob, audioResult.mimeType || 'audio/webm');
-    console.log(`Audio saved: ${(audioResult.blob.size / 1024).toFixed(1)} KB`);
-  } else {
-    console.warn('No audio blob available to save!');
-  }
-
-  // Sync segments to backend for cross-device access
-  await SegmentService.syncToBackend(state.currentPageId);
-
-  // Auto-analyze with Gemini AI (if available)
-  autoAnalyzeRecording(state.currentPageId);
 }
 
 /**
@@ -1124,27 +1467,6 @@ function getAPIBase() {
 }
 
 /**
- * Toggle pause
- */
-function togglePause() {
-  if (state.isPaused) {
-    // Resume
-    speechService.resume();
-    audioRecorder.resume();
-    state.isPaused = false;
-    startTimer();
-  } else {
-    // Pause
-    speechService.pause();
-    audioRecorder.pause();
-    state.isPaused = true;
-    stopTimer();
-  }
-
-  renderApp();
-}
-
-/**
  * Save current recording
  */
 async function saveRecording() {
@@ -1164,7 +1486,7 @@ function updateRecognitionStatus(errorMessage = null) {
   if (!statusEl) return;
 
   if (errorMessage) {
-    statusEl.innerHTML = `<span style="color: var(--color-warning)">⚠️ ${errorMessage}</span>`;
+    statusEl.innerHTML = `<span style="color: var(--accent-warning)">⚠️ ${errorMessage}</span>`;
   } else if (state.recognitionActive) {
     statusEl.innerHTML = '✅ 正在识别';
   } else {
@@ -1173,59 +1495,250 @@ function updateRecognitionStatus(errorMessage = null) {
 }
 
 /**
+ * Update streaming status in diagnostics panel
+ */
+function updateStreamingStatus() {
+  const statusEl = document.getElementById('streaming-status');
+  if (!statusEl) return;
+  statusEl.textContent = state.streamingActive ? '🟢 LIVE' : '🟡 CONNECTING';
+}
+
+/**
+ * Handle streaming ASR results
+ */
+function handleStreamingResult(payload) {
+  if (!payload || !payload.text) return;
+
+  const text = normalizeStreamingText(payload.text);
+  if (!text) return;
+
+  const confidence = typeof payload.confidence === 'number' ? payload.confidence : 0;
+  if (shouldIgnoreStreamingText(text, confidence)) {
+    return;
+  }
+
+  if (isStreamingDuplicate(text)) {
+    return;
+  }
+
+  state.streamingLastConfidence = confidence;
+  state.streamingInterimTranscript = text;
+  updateTranscriptDisplay();
+  scheduleStreamingCommit(text, confidence);
+}
+
+function normalizeStreamingText(text) {
+  if (!text) return '';
+  let cleaned = text.replace(/\s+/g, ' ').trim();
+  cleaned = cleaned.replace(/^([。.\u2026,，!?！？;；:：、\-\—]+\s*)+/g, '');
+  cleaned = cleaned.replace(/([。.!?！？，,])(?:\s*\1)+/g, '$1');
+  cleaned = cleaned.replace(/([。.!?！？]){2,}/g, '$1');
+  cleaned = cleaned.replace(/\s+([。.!?！？])/g, '$1');
+  return cleaned.trim();
+}
+
+function shouldIgnoreStreamingText(text, confidence) {
+  const compact = text.replace(/\s+/g, '');
+  // Ignore single punctuation or punctuation-only bursts during silence
+  const punctuationOnly = /^[\.\,\!\?\:\;\-\—…，。！？；：、]+$/.test(compact);
+  if (punctuationOnly && (compact.length <= 2 || confidence < 0.45)) {
+    return true;
+  }
+  return false;
+}
+
+function clearStreamingCommitTimer() {
+  if (state.streamingCommitTimer) {
+    clearTimeout(state.streamingCommitTimer);
+    state.streamingCommitTimer = null;
+  }
+}
+
+function scheduleStreamingCommit(text, confidence) {
+  clearStreamingCommitTimer();
+  state.streamingCommitTimer = setTimeout(() => {
+    commitStreamingText(text, confidence);
+  }, 1200);
+}
+
+function commitStreamingText(text, confidence) {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+
+  let commitText = trimmed;
+  if (state.streamingLastCommittedText && trimmed.startsWith(state.streamingLastCommittedText)) {
+    commitText = trimmed.slice(state.streamingLastCommittedText.length).trim();
+  }
+  if (!commitText) {
+    state.streamingLastCommittedText = trimmed;
+    return;
+  }
+
+  const baseTime = state.recordingStartTime || Date.now();
+  const timestamp = Date.now() - baseTime;
+  const diarizer = streamingDiarizer || speakerDiarizer;
+  const segmentWithSpeaker = diarizer.processSegment({
+    text: commitText,
+    timestamp: timestamp,
+    confidence: confidence
+  });
+
+  state.streamingSegments.push(segmentWithSpeaker);
+  state.streamingLastCommittedText = trimmed;
+  state.streamingInterimTranscript = '';
+
+  const recordingPageId = state.activeRecordingPageId || state.currentPageId;
+  if (recordingPageId) {
+    SegmentService.add(recordingPageId, {
+      text: commitText,
+      timestamp: timestamp,
+      confidence: confidence,
+      isFinal: true,
+      speaker: segmentWithSpeaker.speaker,
+      speakerLabel: segmentWithSpeaker.speakerLabel,
+      speakerColor: segmentWithSpeaker.speakerColor,
+      source: 'streaming'
+    }).catch((error) => console.error('Failed to save streaming segment:', error));
+  }
+}
+
+function flushStreamingCommit() {
+  clearStreamingCommitTimer();
+  if (state.streamingInterimTranscript) {
+    commitStreamingText(state.streamingInterimTranscript, state.streamingLastConfidence || 0);
+  }
+}
+
+function resetAudioCacheState() {
+  state.audioCacheQueue = [];
+  state.audioCacheSaving = false;
+  state.audioCachedChunks = 0;
+}
+
+function enqueueAudioChunk(pageId, blob) {
+  if (!pageId || !blob || blob.size === 0) return;
+  state.audioCacheQueue.push({ pageId, blob, mimeType: blob.type || 'audio/webm' });
+  if (!state.audioCacheSaving) {
+    void flushAudioCacheQueue();
+  }
+}
+
+async function flushAudioCacheQueue() {
+  if (state.audioCacheSaving) return;
+  state.audioCacheSaving = true;
+  while (state.audioCacheQueue.length > 0) {
+    const item = state.audioCacheQueue.shift();
+    try {
+      await AudioService.save(item.pageId, item.blob, item.mimeType);
+      state.audioCachedChunks += 1;
+    } catch (error) {
+      console.error('Audio cache save failed:', error);
+    }
+  }
+  state.audioCacheSaving = false;
+}
+
+function isStreamingDuplicate(text) {
+  const normalized = text.trim().toLowerCase();
+  const now = Date.now();
+  state.streamingRecent = state.streamingRecent.filter(
+    (entry) => now - entry.time < state.streamingDuplicateWindowMs
+  );
+  if (state.streamingRecent.some((entry) => entry.text === normalized)) {
+    return true;
+  }
+  state.streamingRecent.push({ text: normalized, time: now });
+  if (state.streamingRecent.length > 100) {
+    state.streamingRecent.shift();
+  }
+  return false;
+}
+
+/**
+ * Start speech recognition watchdog for UI status
+ */
+function startSpeechRecognition() {
+  if (!state.isRecording || state.isStoppingRecording) {
+    return;
+  }
+  if (speechService.isRunning) {
+    return;
+  }
+  const started = speechService.start();
+  if (!started) {
+    updateRecognitionStatus('无法启动语音识别');
+    return;
+  }
+  startRecognitionWatchdog();
+  updateRecognitionStatus();
+}
+
+function startRecognitionWatchdog() {
+  stopRecognitionWatchdog();
+  recognitionWatchdog = setInterval(() => {
+    if (!state.isRecording) return;
+    const idleMs = Date.now() - state.lastRecognitionTime;
+    if (state.recognitionActive && idleMs > 3000) {
+      state.recognitionActive = false;
+      updateRecognitionStatus();
+    }
+  }, 1000);
+}
+
+function stopRecognitionWatchdog() {
+  if (recognitionWatchdog) {
+    clearInterval(recognitionWatchdog);
+    recognitionWatchdog = null;
+  }
+}
+
+/**
  * Update transcript display in real-time
  */
 function updateTranscriptDisplay() {
+  const placeholderTitle = state.isRecording ? '🎤 正在聆听...' : '🎤 点击下方按钮开始录音';
+  const placeholderHint = '转录的文字将在这里实时显示';
+
+  if (state.compareMode && state.useWhisper && state.whisperAvailable) {
+    const webContainer = document.getElementById('transcript-container-web');
+    const streamContainer = document.getElementById('transcript-container-streaming');
+
+    if (webContainer) {
+      webContainer.innerHTML = renderTranscriptContent(
+        state.webSpeechSegments,
+        state.interimTranscript,
+        placeholderTitle,
+        placeholderHint
+      );
+      webContainer.scrollTop = webContainer.scrollHeight;
+    }
+
+    if (streamContainer) {
+      streamContainer.innerHTML = renderTranscriptContent(
+        state.streamingSegments,
+        state.streamingInterimTranscript,
+        placeholderTitle,
+        placeholderHint
+      );
+      streamContainer.scrollTop = streamContainer.scrollHeight;
+    }
+    return;
+  }
+
   const container = document.getElementById('transcript-container');
   if (!container) return;
 
-  // Group segments by speaker for better display
-  let html = '<div class="transcript-segments">';
-  let lastSpeaker = null;
+  const useStreaming = isStreamingPreferred();
+  const segments = useStreaming ? state.streamingSegments : state.webSpeechSegments;
+  const interim = useStreaming ? state.streamingInterimTranscript : state.interimTranscript;
 
-  state.segments.forEach((seg, index) => {
-    const isNewSpeaker = seg.speaker !== lastSpeaker;
-    if (isNewSpeaker) {
-      if (lastSpeaker !== null) {
-        html += '</div></div>'; // Close speaker-text AND speaker-block
-      }
-      html += `
-              <div class="speaker-block">
-                <div class="speaker-label" style="color: ${seg.speakerColor}">
-                  <span class="speaker-dot" style="background-color: ${seg.speakerColor}"></span>
-                  ${escapeHtml(seg.speakerLabel)}
-                </div>
-                <div class="speaker-text">
-            `;
-    }
-    html += `<span class="segment-text">${escapeHtml(seg.text)} </span>`;
-    lastSpeaker = seg.speaker;
-  });
+  container.innerHTML = renderTranscriptContent(
+    segments,
+    interim,
+    placeholderTitle,
+    placeholderHint
+  );
 
-  if (state.segments.length > 0) {
-    html += '</div></div>'; // Close speaker-text and speaker-block
-  }
-
-  // Add interim result
-  if (state.interimTranscript) {
-    html += `<div class="interim-text">${escapeHtml(state.interimTranscript)}</div>`;
-  }
-
-  html += '</div>';
-
-  // Show placeholder if no content
-  if (state.segments.length === 0 && !state.interimTranscript) {
-    container.innerHTML = `
-        <div class="transcript-placeholder">
-          <p>🎤 正在聆听...</p>
-          <p class="text-muted mt-sm">转录的文字将在这里实时显示</p>
-        </div>
-      `;
-  } else {
-    container.innerHTML = html;
-  }
-
-  // Auto scroll to bottom
   container.scrollTop = container.scrollHeight;
 }
 
@@ -1257,9 +1770,14 @@ function startTimer() {
   state.timerInterval = setInterval(() => {
     // Query element inside interval to handle DOM re-renders
     const timerEl = document.getElementById('timer');
+    const bannerTimerEl = document.getElementById('recording-banner-timer');
     if (timerEl && state.recordingStartTime) {
       const elapsed = Math.floor((Date.now() - state.recordingStartTime) / 1000);
       timerEl.textContent = formatDuration(elapsed);
+    }
+    if (bannerTimerEl && state.recordingStartTime) {
+      const elapsed = Math.floor((Date.now() - state.recordingStartTime) / 1000);
+      bannerTimerEl.textContent = formatDuration(elapsed);
     }
   }, 1000);
 }
@@ -1304,6 +1822,8 @@ async function openPage(pageId) {
   state.currentView = 'detail';
   state.currentSource = null;  // Reset to default
   state.pageSummary = null;    // Clear previous summary
+  state.pageTodos = [];
+  state.todosLoading = true;
   renderApp();
 
   // Get available sources first
@@ -1314,6 +1834,9 @@ async function openPage(pageId) {
 
   // Load audio player
   loadAudioPlayer(pageId);
+
+  // Load todos
+  loadTodos(pageId);
 }
 
 /**
@@ -1331,6 +1854,7 @@ async function loadPageContent(pageId, source = null) {
   if (state.availableSources.length > 1) {
     const sourceLabels = {
       'web_speech': '🌐 实时转录',
+      'streaming': '⚡ 实时后端',
       'backend': '🤖 后端 ASR',
       'funasr': '🇨🇳 FunASR',
       'whisper': '🐳 Whisper'
@@ -1376,7 +1900,13 @@ async function loadPageContent(pageId, source = null) {
                 <div class="speaker-text">
             `;
     }
-    html += `<span class="segment-text">${escapeHtml(seg.text)} </span>`;
+    const isLowConfidence = typeof seg.confidence === 'number'
+      && seg.confidence > 0
+      && seg.confidence < LOW_CONFIDENCE_THRESHOLD;
+    const confidenceTitle = isLowConfidence
+      ? ` title="置信度 ${(seg.confidence * 100).toFixed(0)}%"`
+      : '';
+    html += `<span class="segment-text${isLowConfidence ? ' low-confidence' : ''}"${confidenceTitle}>${escapeHtml(seg.text)} </span>`;
     lastSpeaker = seg.speaker;
   });
 
@@ -1387,6 +1917,44 @@ async function loadPageContent(pageId, source = null) {
   html += `<p class="text-muted mt-sm" style="font-size: 0.85em;">📊 ${segments.length} 段 | ${totalChars} 字</p>`;
 
   contentEl.innerHTML = html;
+}
+
+/**
+ * Load todos for a page and update panel
+ */
+async function loadTodos(pageId) {
+  state.todosLoading = true;
+  const panelEl = document.getElementById('todo-panel');
+  if (panelEl) {
+    panelEl.innerHTML = renderTodoPanelContent();
+  }
+
+  try {
+    state.pageTodos = await TodoService.getByPageId(pageId);
+  } catch (error) {
+    console.error('Failed to load todos:', error);
+    state.pageTodos = [];
+  } finally {
+    state.todosLoading = false;
+  }
+
+  if (panelEl) {
+    panelEl.innerHTML = renderTodoPanelContent();
+  } else {
+    renderApp();
+  }
+}
+
+/**
+ * Toggle todo completion
+ */
+async function toggleTodo(todoId) {
+  try {
+    await TodoService.toggle(todoId);
+    await loadTodos(state.currentPageId);
+  } catch (error) {
+    console.error('Failed to toggle todo:', error);
+  }
 }
 
 /**
@@ -1540,3 +2108,51 @@ window.downloadAudio = downloadAudio;
 // Initialize app when DOM is ready
 document.addEventListener('DOMContentLoaded', init);
 
+/**
+ * Draw Visualizer
+ */
+function drawVisualizer() {
+  if (!state.isRecording) return;
+
+  const canvas = document.getElementById('audio-visualizer');
+  if (!canvas) {
+    requestAnimationFrame(drawVisualizer);
+    return;
+  }
+
+  const ctx = canvas.getContext('2d');
+  const width = canvas.width = canvas.offsetWidth;
+  const height = canvas.height = canvas.offsetHeight;
+
+  // Get data
+  const dataArray = audioRecorder.getFrequencyData(); // Needs getFrequencyData exposed in service
+  // Or check if it exists. AudioRecorderService in step 231 HAS getFrequencyData.
+
+  ctx.clearRect(0, 0, width, height);
+
+  const waveform = audioRecorder.getWaveformData();
+  if (waveform.length > 0) {
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(0, 243, 255, 0.9)';
+    ctx.beginPath();
+    const sliceWidth = width / waveform.length;
+    let xPos = 0;
+    for (let i = 0; i < waveform.length; i++) {
+      const v = waveform[i] / 128.0;
+      const y = (v * height) / 2;
+      if (i === 0) {
+        ctx.moveTo(xPos, y);
+      } else {
+        ctx.lineTo(xPos, y);
+      }
+      xPos += sliceWidth;
+    }
+    ctx.lineTo(width, height / 2);
+    ctx.stroke();
+  }
+
+  requestAnimationFrame(drawVisualizer);
+}
+
+// Make globally available if needed
+window.drawVisualizer = drawVisualizer;
