@@ -4,6 +4,7 @@ import ListView from './components/list/ListView';
 import RecordingView from './components/recording/RecordingView';
 import DetailView from './components/detail/DetailView';
 import HotwordsView from './components/hotwords/HotwordsView';
+import TodoView from './components/todos/TodoView';
 import './styles/index.css';
 
 function App() {
@@ -16,6 +17,7 @@ function App() {
           <Route path="recording/:id" element={<RecordingView />} />
           <Route path="detail/:id" element={<DetailView />} />
           <Route path="hotwords" element={<HotwordsView />} />
+          <Route path="todos" element={<TodoView />} />
         </Route>
       </Routes>
     </BrowserRouter>

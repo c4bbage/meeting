@@ -300,6 +300,30 @@ export const SegmentService = {
   },
 
   /**
+   * Find pages whose final segments contain the query text
+   */
+  async searchPageIdsByText(query) {
+    const trimmed = (query || '').trim().toLowerCase();
+    if (!trimmed) return [];
+
+    const remoteIds = await SegmentSync.searchPageIdsByText(trimmed);
+    if (Array.isArray(remoteIds)) {
+      return remoteIds;
+    }
+
+    const segments = await db.segments
+      .where('isFinal')
+      .equals(true)
+      .filter(seg => {
+        if (!seg?.text) return false;
+        return seg.text.toLowerCase().includes(trimmed);
+      })
+      .toArray();
+
+    return Array.from(new Set(segments.map(seg => seg.pageId)));
+  },
+
+  /**
    * Get available sources for a page (e.g., ['web_speech', 'whisper'])
    */
   async getSourcesByPageId(pageId) {
@@ -645,6 +669,16 @@ export const TodoService = {
       .where('pageId')
       .equals(pageId)
       .sortBy('createdAt');
+  },
+
+  /**
+   * Get all todos (newest first)
+   */
+  async getAll() {
+    return await db.todos
+      .orderBy('createdAt')
+      .reverse()
+      .toArray();
   },
 
   /**

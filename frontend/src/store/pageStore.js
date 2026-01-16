@@ -68,7 +68,13 @@ export const usePageStore = create((set, get) => ({
     toggleTodo: async (todoId) => {
         const todo = get().pageTodos.find(t => t.id === todoId);
         if (todo) {
-            await TodoService.update(todoId, { completed: !todo.completed });
+            const nextCompleted = !todo.completed;
+            await TodoService.update(todoId, { completed: nextCompleted });
+            set(state => ({
+                pageTodos: state.pageTodos.map(item => (
+                    item.id === todoId ? { ...item, completed: nextCompleted } : item
+                ))
+            }));
             const currentPageId = get().currentPageId;
             if (currentPageId) {
                 await get().loadTodos(currentPageId);

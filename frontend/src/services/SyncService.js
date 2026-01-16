@@ -155,6 +155,26 @@ export const SegmentSync = {
             console.warn('Failed to sync segments to backend:', error.message);
             return null;
         }
+    },
+
+    /**
+     * Search page IDs by transcript content (backend)
+     */
+    async searchPageIdsByText(query) {
+        const trimmed = (query || '').trim();
+        if (!trimmed) return [];
+        try {
+            const response = await fetch(
+                `${API_BASE}/search/pages?query=${encodeURIComponent(trimmed)}`,
+                { signal: AbortSignal.timeout(4000) }
+            );
+            if (!response.ok) throw new Error('Failed to search segments');
+            const data = await response.json();
+            return data.pageIds || [];
+        } catch (error) {
+            console.warn('Failed to search segments on backend:', error.message);
+            return null;
+        }
     }
 };
 

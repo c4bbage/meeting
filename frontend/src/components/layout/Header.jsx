@@ -15,7 +15,8 @@ function Header() {
     const currentView = location.pathname === '/' ? 'list'
         : location.pathname.startsWith('/recording') ? 'recording'
             : location.pathname.startsWith('/detail') ? 'detail'
-                : 'other';
+                : location.pathname.startsWith('/todos') ? 'todos'
+                    : 'other';
 
     const handleStartNewRecording = async () => {
         if (isRecording && activeRecordingPageId) {
@@ -53,6 +54,12 @@ function Header() {
                             onClick={() => navigate('/hotwords')}
                         >
                             🔤 热词管理
+                        </button>
+                        <button
+                            className={`btn btn-sm nav-item ${currentView === 'todos' ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => navigate('/todos')}
+                        >
+                            ✅ 待办总览
                         </button>
                     </nav>
                 </div>

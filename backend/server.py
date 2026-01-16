@@ -180,6 +180,21 @@ async def save_segments(page_id: str, data: SegmentsBulkCreate):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# === Search API ===
+
+@app.get("/api/search/pages")
+async def search_pages(query: str, include_deleted: bool = False):
+    """Search page IDs by transcript content."""
+    if not query or not query.strip():
+        return {"success": True, "pageIds": []}
+
+    page_ids = SegmentStorage.search_page_ids_by_text(
+        query,
+        include_deleted=include_deleted
+    )
+    return {"success": True, "pageIds": page_ids}
+
+
 @app.post("/api/pages/{page_id}/audio_chunk")
 async def upload_audio_chunk(
     page_id: str,

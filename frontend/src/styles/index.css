@@ -545,6 +545,95 @@ h3 {
   opacity: 0.5;
 }
 
+.list-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
+  flex-wrap: wrap;
+}
+
+.list-controls .input {
+  flex: 1;
+  min-width: 220px;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+}
+
+.list-controls .input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px var(--accent-primary-glow);
+}
+
+.list-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  margin-top: var(--space-lg);
+  flex-wrap: wrap;
+}
+
+.pagination-info {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.pagination-pages {
+  display: flex;
+  gap: var(--space-xs);
+}
+
+.pagination-size {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.pagination-size .select {
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.pagination-size .select:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+@media (max-width: 700px) {
+  .pagination {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+
 /* ========================================
    Recording View
    ======================================== */
@@ -1552,6 +1641,165 @@ h3 {
 
   .hotword-item {
     flex-wrap: wrap;
+  }
+}
+
+/* ========================================
+   Todo Overview
+   ======================================== */
+
+.todo-overview {
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.todo-overview-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
+  flex-wrap: wrap;
+}
+
+.todo-overview-header h1 {
+  font-size: 1.75rem;
+  margin-bottom: var(--space-xs);
+}
+
+.todo-overview-summary {
+  display: flex;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.todo-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-lg);
+}
+
+.todo-filters .input,
+.todo-filters .select {
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+}
+
+.todo-filters .input:focus,
+.todo-filters .select:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px var(--accent-primary-glow);
+}
+
+.todo-overview-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.todo-card {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-md) var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.todo-card.completed {
+  opacity: 0.7;
+}
+
+.todo-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.todo-card-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: 1rem;
+  color: var(--text-primary);
+}
+
+.todo-card-text {
+  line-height: 1.6;
+}
+
+.todo-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+.todo-chip.muted {
+  opacity: 0.6;
+}
+
+.todo-chip-alert {
+  border-color: rgba(245, 158, 11, 0.45);
+  color: var(--accent-warning);
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.todo-card-edit {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-sm);
+  padding: var(--space-sm) 0;
+}
+
+.todo-card-check .input,
+.todo-card-edit .input,
+.todo-card-edit .select {
+  flex: 1;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.9rem;
+}
+
+.todo-followup-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.todo-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.todo-card-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+
+@media (max-width: 720px) {
+  .todo-card-footer {
+    flex-direction: column;
   }
 }
 

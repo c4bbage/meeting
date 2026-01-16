@@ -16,6 +16,7 @@ function DetailView() {
         todosLoading,
         geminiAvailable,
         loadPages,
+        openPage,
         deletePage,
         updatePage,
         setSummaryLoading,
@@ -40,6 +41,7 @@ function DetailView() {
     useEffect(() => {
         if (id) {
             loadPageData();
+            openPage(id);
         }
     }, [id, pages]);
 

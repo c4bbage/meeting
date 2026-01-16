@@ -356,6 +356,31 @@ class SegmentStorage:
                 )
             rows = cursor.fetchall()
             return [SegmentStorage._row_to_dict(row) for row in rows]
+
+    @staticmethod
+    def search_page_ids_by_text(query: str, include_deleted: bool = False) -> List[str]:
+        """Find page IDs whose final segments contain the query text."""
+        trimmed = (query or "").strip().lower()
+        if not trimmed:
+            return []
+
+        like_query = f"%{trimmed}%"
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            if include_deleted:
+                cursor.execute(
+                    "SELECT DISTINCT page_id FROM segments "
+                    "WHERE is_final = 1 AND LOWER(text) LIKE ?",
+                    (like_query,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT DISTINCT page_id FROM segments "
+                    "WHERE deleted_at IS NULL AND is_final = 1 AND LOWER(text) LIKE ?",
+                    (like_query,)
+                )
+            rows = cursor.fetchall()
+            return [row["page_id"] for row in rows]
     
     @staticmethod
     def delete_by_page_id(page_id: str) -> int:
