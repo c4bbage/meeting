@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { usePageStore } from '../../store/pageStore';
-import { PageService, SegmentService, AudioService, TodoService } from '../../services/Database';
+import { PageService, SegmentService, AudioService, TodoService, SpeakerDataService } from '../../services/Database';
 import { formatDateTime, formatDurationHuman, escapeHtml, downloadFile } from '../../utils/helpers';
 
 function DetailView() {
@@ -342,6 +342,61 @@ function DetailView() {
                         title="导出为 MP3 格式（含时长信息）"
                     >
                         🎵 导出 MP3
+                    </button>
+                    <button
+                        className="btn btn-sm btn-primary"
+                        onClick={async () => {
+                            if (!page) return;
+                            const btn = document.activeElement;
+                            const originalText = btn.innerText;
+                            btn.innerText = '⏳ 同步中...';
+                            btn.disabled = true;
+
+                            try {
+                                // 1. Sync Metadata
+                                await PageService.update(id, page);
+
+                                // 2. Sync Todos (using new independent API)
+                                await TodoService.syncToBackend(id);
+
+                                // 3. Sync Segments
+                                await SegmentService.syncToBackend(id);
+
+                                // 4. Sync Speaker Data
+                                const speakerData = await SpeakerDataService.load(id);
+                                if (speakerData) {
+                                    await SpeakerDataService.save(id, speakerData);
+                                }
+
+                                // 5. Sync Audio File (Critical for cross-device playback)
+                                const audioBlob = await AudioService.getAudio(id);
+                                if (audioBlob) {
+                                    const formData = new FormData();
+                                    formData.append('file', audioBlob, 'recording.webm');
+
+                                    const uploadRes = await fetch(`/api/pages/${id}/upload`, {
+                                        method: 'POST',
+                                        body: formData
+                                    });
+
+                                    if (!uploadRes.ok) {
+                                        console.warn('Audio upload failed during sync');
+                                    } else {
+                                        console.log('Audio blob synced to backend');
+                                    }
+                                }
+
+                                alert('✅ 云端同步成功！\n\n已同步内容：\n1. 会议元数据\n2. 待办事项\n3. 转录文本段落\n4. 说话人数据\n5. 录音音频文件\n\n请在另一台设备刷新查看。');
+                            } catch (e) {
+                                alert('❌ 同步失败: ' + e.message);
+                            } finally {
+                                btn.innerText = originalText;
+                                btn.disabled = false;
+                            }
+                        }}
+                        title="将本地的 AI 总结、待办事项、录音文件强制同步到云端"
+                    >
+                        ☁️ 云端同步
                     </button>
                 </div>
             </div>

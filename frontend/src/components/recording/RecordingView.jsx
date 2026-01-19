@@ -763,6 +763,35 @@ function RecordingView() {
             const result = await response.json();
             if (result.success) {
                 setAssistantContent(result.summary);
+
+                // Persist AI results to DB/Backend
+                if (activeRecordingPageId) {
+                    // Update Page metadata (Summary, Decisions, KeyPoints)
+                    await PageService.update(activeRecordingPageId, {
+                        summary: result.summary,
+                        keyPoints: result.key_points,
+                        decisions: result.decisions,
+                        analyzed: true,
+                        todos: result.todos, // Include full todos for backend persistence
+                        todoCount: result.todos ? result.todos.length : 0
+                    });
+
+                    // Save Todos if any
+                    if (result.todos && result.todos.length > 0) {
+                        try {
+                            const todos = result.todos.map(t => ({
+                                ...t,
+                                pageId: activeRecordingPageId
+                            }));
+                            await TodoService.addBatch(activeRecordingPageId, todos);
+                            console.log(`Saved ${todos.length} todos locally`);
+                        } catch (e) {
+                            console.warn('Failed to save todos:', e);
+                        }
+                    }
+
+                    console.log('✅ AI analysis saved to backend');
+                }
             } else {
                 setAssistantContent('❌ 分析失败');
             }

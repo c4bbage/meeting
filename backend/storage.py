@@ -83,6 +83,37 @@ def init_db():
             )
         """)
         
+        # Speaker data table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS speaker_data (
+                page_id TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (page_id) REFERENCES pages(id)
+            )
+        """)
+
+        # Todos table (independent storage for better sync)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS todos (
+                id TEXT PRIMARY KEY,
+                page_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                category TEXT DEFAULT 'other',
+                deadline TEXT,
+                priority TEXT DEFAULT 'medium',
+                assignee TEXT,
+                completed INTEGER DEFAULT 0,
+                needs_reminder INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT DEFAULT NULL,
+                FOREIGN KEY (page_id) REFERENCES pages(id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_todos_page_id ON todos(page_id)")
+
         # Create indexes
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_segments_page_id ON segments(page_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_pages_deleted_at ON pages(deleted_at)")
@@ -414,4 +445,225 @@ class SegmentStorage:
             'words': words,
             'source': row['source'],
             'createdAt': row['created_at']
+        }
+
+
+class SpeakerDataStorage:
+    """Speaker data storage operations."""
+
+    @staticmethod
+    def save(page_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Save or update speaker data for a page."""
+        now = datetime.now().isoformat()
+        data_json = json.dumps(data, ensure_ascii=False)
+
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT page_id FROM speaker_data WHERE page_id = ?",
+                (page_id,)
+            )
+            existing = cursor.fetchone()
+
+            if existing:
+                cursor.execute(
+                    "UPDATE speaker_data SET data = ?, updated_at = ? WHERE page_id = ?",
+                    (data_json, now, page_id)
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO speaker_data (page_id, data, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    (page_id, data_json, now, now)
+                )
+
+        return SpeakerDataStorage.get(page_id)
+
+    @staticmethod
+    def get(page_id: str) -> Optional[Dict[str, Any]]:
+        """Get speaker data for a page."""
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM speaker_data WHERE page_id = ?",
+                (page_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            return {
+                'pageId': row['page_id'],
+                'data': json.loads(row['data']),
+                'createdAt': row['created_at'],
+                'updatedAt': row['updated_at']
+            }
+
+    @staticmethod
+    def delete(page_id: str) -> bool:
+        """Delete speaker data for a page."""
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM speaker_data WHERE page_id = ?",
+                (page_id,)
+            )
+            return cursor.rowcount > 0
+
+
+class TodoStorage:
+    """Todo CRUD operations."""
+
+    @staticmethod
+    def create(todo_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new todo."""
+        now = datetime.now().isoformat()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO todos (
+                    id, page_id, content, category, deadline, priority,
+                    assignee, completed, needs_reminder, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                todo_data.get('id'),
+                todo_data.get('pageId'),
+                todo_data.get('content', ''),
+                todo_data.get('category', 'other'),
+                todo_data.get('deadline'),
+                todo_data.get('priority', 'medium'),
+                todo_data.get('assignee'),
+                1 if todo_data.get('completed') else 0,
+                1 if todo_data.get('needsReminder') else 0,
+                todo_data.get('createdAt') or now,
+                now
+            ))
+        return TodoStorage.get_by_id(todo_data['id'])
+
+    @staticmethod
+    def get_by_id(todo_id: str) -> Optional[Dict[str, Any]]:
+        """Get a single todo by ID."""
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM todos WHERE id = ? AND deleted_at IS NULL", (todo_id,))
+            row = cursor.fetchone()
+            return TodoStorage._row_to_dict(row) if row else None
+
+    @staticmethod
+    def get_by_page_id(page_id: str) -> List[Dict[str, Any]]:
+        """Get all todos for a page."""
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM todos WHERE page_id = ? AND deleted_at IS NULL ORDER BY created_at",
+                (page_id,)
+            )
+            rows = cursor.fetchall()
+            return [TodoStorage._row_to_dict(row) for row in rows]
+
+    @staticmethod
+    def update(todo_id: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Update a todo."""
+        now = datetime.now().isoformat()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+
+            fields = []
+            values = []
+            for key, value in data.items():
+                if key == 'content':
+                    fields.append("content = ?")
+                    values.append(value)
+                elif key == 'category':
+                    fields.append("category = ?")
+                    values.append(value)
+                elif key == 'deadline':
+                    fields.append("deadline = ?")
+                    values.append(value)
+                elif key == 'priority':
+                    fields.append("priority = ?")
+                    values.append(value)
+                elif key == 'assignee':
+                    fields.append("assignee = ?")
+                    values.append(value)
+                elif key == 'completed':
+                    fields.append("completed = ?")
+                    values.append(1 if value else 0)
+                elif key == 'needsReminder':
+                    fields.append("needs_reminder = ?")
+                    values.append(1 if value else 0)
+
+            if fields:
+                fields.append("updated_at = ?")
+                values.append(now)
+                values.append(todo_id)
+
+                cursor.execute(
+                    f"UPDATE todos SET {', '.join(fields)} WHERE id = ?",
+                    values
+                )
+
+        return TodoStorage.get_by_id(todo_id)
+
+    @staticmethod
+    def delete(todo_id: str) -> bool:
+        """Soft delete a todo."""
+        now = datetime.now().isoformat()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE todos SET deleted_at = ? WHERE id = ?",
+                (now, todo_id)
+            )
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def bulk_sync(page_id: str, todos: List[Dict[str, Any]]) -> int:
+        """Bulk sync todos for a page (replaces existing)."""
+        now = datetime.now().isoformat()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Delete existing todos for this page
+            cursor.execute("DELETE FROM todos WHERE page_id = ?", (page_id,))
+
+            # Insert new todos
+            for todo in todos:
+                cursor.execute("""
+                    INSERT INTO todos (
+                        id, page_id, content, category, deadline, priority,
+                        assignee, completed, needs_reminder, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    todo.get('id'),
+                    page_id,
+                    todo.get('content', ''),
+                    todo.get('category', 'other'),
+                    todo.get('deadline'),
+                    todo.get('priority', 'medium'),
+                    todo.get('assignee'),
+                    1 if todo.get('completed') else 0,
+                    1 if todo.get('needsReminder') else 0,
+                    todo.get('createdAt') or now,
+                    todo.get('updatedAt') or now
+                ))
+
+        return len(todos)
+
+    @staticmethod
+    def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+        """Convert sqlite row to dict with camelCase keys."""
+        return {
+            'id': row['id'],
+            'pageId': row['page_id'],
+            'content': row['content'],
+            'category': row['category'],
+            'deadline': row['deadline'],
+            'priority': row['priority'],
+            'assignee': row['assignee'],
+            'completed': bool(row['completed']),
+            'needsReminder': bool(row['needs_reminder']),
+            'createdAt': row['created_at'],
+            'updatedAt': row['updated_at']
         }

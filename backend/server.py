@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
 from .hotwords import get_hotword_manager, CATEGORIES
-from .storage import PageStorage, SegmentStorage
+from .storage import PageStorage, SegmentStorage, SpeakerDataStorage, TodoStorage
 from .transcription import get_transcription_service
 
 # ASR Engine selection via environment variable
@@ -195,6 +195,108 @@ async def search_pages(query: str, include_deleted: bool = False):
     return {"success": True, "pageIds": page_ids}
 
 
+# === Speaker Data API ===
+
+class SpeakerDataCreate(BaseModel):
+    data: Dict[str, Any]
+
+
+@app.get("/api/pages/{page_id}/speakers")
+async def get_speaker_data(page_id: str):
+    """Get speaker data for a page."""
+    speaker_data = SpeakerDataStorage.get(page_id)
+    return {"success": True, "speakerData": speaker_data}
+
+
+@app.post("/api/pages/{page_id}/speakers")
+async def save_speaker_data(page_id: str, request: SpeakerDataCreate):
+    """Save speaker data for a page."""
+    try:
+        speaker_data = SpeakerDataStorage.save(page_id, request.data)
+        return {"success": True, "speakerData": speaker_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# === Todos API ===
+
+class TodoCreate(BaseModel):
+    id: str
+    pageId: str
+    content: str
+    category: str = "other"
+    deadline: Optional[str] = None
+    priority: str = "medium"
+    assignee: Optional[str] = None
+    completed: bool = False
+    needsReminder: bool = False
+    createdAt: Optional[str] = None
+    updatedAt: Optional[str] = None
+
+
+class TodoUpdate(BaseModel):
+    content: Optional[str] = None
+    category: Optional[str] = None
+    deadline: Optional[str] = None
+    priority: Optional[str] = None
+    assignee: Optional[str] = None
+    completed: Optional[bool] = None
+    needsReminder: Optional[bool] = None
+
+
+class TodosBulkSync(BaseModel):
+    todos: List[TodoCreate]
+
+
+@app.get("/api/pages/{page_id}/todos")
+async def get_todos(page_id: str):
+    """Get all todos for a page."""
+    todos = TodoStorage.get_by_page_id(page_id)
+    return {"success": True, "todos": todos}
+
+
+@app.post("/api/pages/{page_id}/todos")
+async def create_todo(page_id: str, todo: TodoCreate):
+    """Create a new todo."""
+    try:
+        todo_data = todo.model_dump()
+        todo_data['pageId'] = page_id
+        created = TodoStorage.create(todo_data)
+        return {"success": True, "todo": created}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/pages/{page_id}/todos/sync")
+async def sync_todos(page_id: str, data: TodosBulkSync):
+    """Bulk sync todos for a page (replaces existing)."""
+    try:
+        todos_data = [t.model_dump() for t in data.todos]
+        count = TodoStorage.bulk_sync(page_id, todos_data)
+        return {"success": True, "count": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/todos/{todo_id}")
+async def update_todo(todo_id: str, data: TodoUpdate):
+    """Update a todo."""
+    update_data = {k: v for k, v in data.model_dump().items() if v is not None}
+    todo = TodoStorage.update(todo_id, update_data)
+    if not todo:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return {"success": True, "todo": todo}
+
+
+@app.delete("/api/todos/{todo_id}")
+async def delete_todo(todo_id: str):
+    """Delete a todo."""
+    success = TodoStorage.delete(todo_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return {"success": True}
+
+
 @app.post("/api/pages/{page_id}/audio_chunk")
 async def upload_audio_chunk(
     page_id: str,
@@ -249,6 +351,35 @@ async def get_audio(page_id: str):
     raise HTTPException(status_code=404, detail="Full audio recording not finalized yet. Please try Export MP3.")
 
 
+@app.post("/api/pages/{page_id}/upload")
+async def upload_audio(
+    page_id: str,
+    file: UploadFile = File(...)
+):
+    """Upload complete audio file for a page."""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    try:
+        # Create page directory
+        DATA_DIR = Path("data")
+        page_dir = DATA_DIR / page_id
+        page_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save as recording.webm
+        recording_path = page_dir / "recording.webm"
+
+        content = await file.read()
+        with open(recording_path, 'wb') as f:
+            f.write(content)
+
+        logger.info(f"Saved audio for {page_id}: {len(content)} bytes")
+        return {"success": True, "size": len(content), "path": str(recording_path)}
+    except Exception as e:
+        logger.error(f"Failed to save audio: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/pages/{page_id}/export/mp3")
 async def export_mp3(page_id: str):
     """Convert and export audio as MP3 using ffmpeg"""
@@ -297,21 +428,7 @@ async def export_mp3(page_id: str):
     )
 
 
-            return stem
 
-    chunk_files.sort(key=chunk_key)
-
-    def iter_chunks():
-        for path in chunk_files:
-            with open(path, "rb") as fh:
-                while True:
-                    data = fh.read(8192)
-                    if not data:
-                        break
-                    yield data
-
-    headers = {"Content-Disposition": f"inline; filename={page_id}.webm"}
-    return StreamingResponse(iter_chunks(), media_type="audio/webm", headers=headers)
 
 
 # === Transcription API ===

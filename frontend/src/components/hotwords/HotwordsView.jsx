@@ -16,6 +16,9 @@ function HotwordsView() {
     }, []);
 
     const loadHotwords = async () => {
+        // First sync from backend to get hotwords from all devices
+        await HotwordService.syncFromBackend();
+        // Then load from local DB
         const words = await HotwordService.getAll();
         setHotwords(words);
     };

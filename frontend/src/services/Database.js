@@ -6,6 +6,7 @@
 import Dexie from 'dexie';
 
 import { PageSync, SegmentSync, isBackendAvailable } from './SyncService.js';
+import { getWhisperAPI } from './WhisperAPI.js';
 
 // Database instance
 const db = new Dexie('MeetingTranscriptionDB');
@@ -154,8 +155,21 @@ export const PageService = {
     data.updatedAt = new Date();
     await db.pages.update(id, data);
 
-    // Sync to backend
-    PageSync.update(id, data);
+    await db.pages.update(id, data);
+
+    // Sync to backend (Upsert logic)
+    // Try to update first, if that fails (e.g. 404 not found on backend), try to create
+    PageSync.update(id, data).then(updatedPage => {
+      if (!updatedPage) {
+        console.log('Update failed on backend, trying to create page...', id);
+        // Fetch full local page to ensure we have all fields for creation
+        db.pages.get(id).then(fullPage => {
+          if (fullPage) {
+            PageSync.create(fullPage);
+          }
+        });
+      }
+    });
 
     return await this.getById(id);
   },
@@ -385,9 +399,10 @@ export const SegmentService = {
  */
 export const SpeakerDataService = {
   /**
-   * Save speaker diarization state for a page
+   * Save speaker diarization state for a page (syncs to backend)
    */
   async save(pageId, data) {
+    // Save locally first
     const existing = await db.speakerData.get(pageId);
     if (existing) {
       await db.speakerData.update(pageId, { data, updatedAt: new Date() });
@@ -398,6 +413,20 @@ export const SpeakerDataService = {
         createdAt: new Date(),
         updatedAt: new Date()
       });
+    }
+
+    // Sync to backend
+    try {
+      const backendAvailable = await isBackendAvailable();
+      if (backendAvailable) {
+        await fetch(`/api/pages/${pageId}/speakers`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ data })
+        });
+      }
+    } catch (error) {
+      console.warn('Failed to sync speaker data to backend:', error);
     }
   },
 
@@ -414,6 +443,45 @@ export const SpeakerDataService = {
    */
   async delete(pageId) {
     await db.speakerData.delete(pageId);
+  },
+
+  /**
+   * Sync speaker data from backend to local IndexedDB
+   */
+  async syncFromBackend(pageId) {
+    try {
+      const backendAvailable = await isBackendAvailable();
+      if (!backendAvailable) return null;
+
+      const response = await fetch(`/api/pages/${pageId}/speakers`);
+      if (!response.ok) return null;
+
+      const result = await response.json();
+      if (result.success && result.speakerData?.data) {
+        const backendData = result.speakerData;
+
+        // Save to local DB
+        const existing = await db.speakerData.get(pageId);
+        if (existing) {
+          await db.speakerData.update(pageId, {
+            data: backendData.data,
+            updatedAt: new Date(backendData.updatedAt)
+          });
+        } else {
+          await db.speakerData.add({
+            pageId,
+            data: backendData.data,
+            createdAt: new Date(backendData.createdAt),
+            updatedAt: new Date(backendData.updatedAt)
+          });
+        }
+
+        return backendData.data;
+      }
+    } catch (error) {
+      console.warn('Failed to sync speaker data from backend:', error);
+    }
+    return null;
   }
 };
 
@@ -436,13 +504,40 @@ export const HotwordService = {
   },
 
   /**
-   * Add a new hotword
+   * Add a new hotword (syncs to backend)
    */
   async add(word, category = 'other') {
-    // Check for duplicates
+    // First sync to backend
+    try {
+      const api = getWhisperAPI();
+      const result = await api.addHotword(word, category);
+      if (result.success && result.hotword) {
+        // Use backend's hotword data (includes server-generated ID)
+        const backendHotword = result.hotword;
+        const hotword = {
+          id: backendHotword.id,
+          word: backendHotword.word,
+          category: backendHotword.category,
+          createdAt: new Date(backendHotword.createdAt),
+          updatedAt: new Date(backendHotword.updatedAt)
+        };
+
+        // Check for duplicates in local DB
+        const existing = await db.hotwords.where('word').equals(word).first();
+        if (existing) {
+          await db.hotwords.update(existing.id, hotword);
+        } else {
+          await db.hotwords.put(hotword);
+        }
+        return hotword;
+      }
+    } catch (error) {
+      console.warn('Failed to sync hotword to backend:', error);
+    }
+
+    // Fallback: save locally only if backend fails
     const existing = await db.hotwords.where('word').equals(word).first();
     if (existing) {
-      // Update category if exists
       await db.hotwords.update(existing.id, {
         category,
         updatedAt: new Date()
@@ -476,9 +571,17 @@ export const HotwordService = {
   },
 
   /**
-   * Delete a hotword
+   * Delete a hotword (syncs to backend)
    */
   async delete(id) {
+    // First sync to backend
+    try {
+      const api = getWhisperAPI();
+      await api.deleteHotword(id);
+    } catch (error) {
+      console.warn('Failed to delete hotword from backend:', error);
+    }
+    // Always delete locally
     await db.hotwords.delete(id);
   },
 
@@ -516,6 +619,38 @@ export const HotwordService = {
     }
 
     return parts.length ? parts.join('。') + '。' : '';
+  },
+
+  /**
+   * Sync hotwords from backend to local IndexedDB
+   * Call this when the page loads to get the latest hotwords from all devices
+   */
+  async syncFromBackend() {
+    try {
+      const api = getWhisperAPI();
+      const result = await api.getHotwords();
+
+      if (result.hotwords && Array.isArray(result.hotwords)) {
+        // Clear local hotwords and replace with backend data
+        await db.hotwords.clear();
+
+        for (const hw of result.hotwords) {
+          await db.hotwords.put({
+            id: hw.id,
+            word: hw.word,
+            category: hw.category,
+            createdAt: new Date(hw.createdAt),
+            updatedAt: new Date(hw.updatedAt)
+          });
+        }
+
+        console.log(`Synced ${result.hotwords.length} hotwords from backend`);
+        return result.hotwords.length;
+      }
+    } catch (error) {
+      console.warn('Failed to sync hotwords from backend:', error);
+    }
+    return 0;
   }
 };
 
@@ -682,7 +817,7 @@ export const TodoService = {
   },
 
   /**
-   * Toggle todo completion
+   * Toggle todo completion (syncs to backend)
    */
   async toggle(id) {
     const todo = await db.todos.get(id);
@@ -692,26 +827,65 @@ export const TodoService = {
         completed: newCompleted,
         updatedAt: new Date()
       });
+
+      // Sync to backend
+      try {
+        const backendAvailable = await isBackendAvailable();
+        if (backendAvailable) {
+          await fetch(`/api/todos/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ completed: newCompleted })
+          });
+        }
+      } catch (error) {
+        console.warn('Failed to sync todo toggle to backend:', error);
+      }
+
       return newCompleted;
     }
     return null;
   },
 
   /**
-   * Update a todo
+   * Update a todo (syncs to backend)
    */
   async update(id, data) {
     await db.todos.update(id, {
       ...data,
       updatedAt: new Date()
     });
+
+    // Sync to backend
+    try {
+      const backendAvailable = await isBackendAvailable();
+      if (backendAvailable) {
+        await fetch(`/api/todos/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+      }
+    } catch (error) {
+      console.warn('Failed to sync todo update to backend:', error);
+    }
   },
 
   /**
-   * Delete a todo
+   * Delete a todo (syncs to backend)
    */
   async delete(id) {
     await db.todos.delete(id);
+
+    // Sync to backend
+    try {
+      const backendAvailable = await isBackendAvailable();
+      if (backendAvailable) {
+        await fetch(`/api/todos/${id}`, { method: 'DELETE' });
+      }
+    } catch (error) {
+      console.warn('Failed to sync todo delete to backend:', error);
+    }
   },
 
   /**
@@ -729,6 +903,87 @@ export const TodoService = {
     const total = todos.length;
     const completed = todos.filter(t => t.completed).length;
     return { completed, total };
+  },
+
+  /**
+   * Sync all todos for a page to backend
+   */
+  async syncToBackend(pageId) {
+    try {
+      const backendAvailable = await isBackendAvailable();
+      if (!backendAvailable) return 0;
+
+      const todos = await this.getByPageId(pageId);
+      const todosData = todos.map(t => ({
+        id: t.id,
+        pageId: t.pageId,
+        content: t.content,
+        category: t.category,
+        deadline: t.deadline,
+        priority: t.priority,
+        assignee: t.assignee,
+        completed: t.completed,
+        needsReminder: t.needsReminder,
+        createdAt: t.createdAt instanceof Date ? t.createdAt.toISOString() : t.createdAt,
+        updatedAt: t.updatedAt instanceof Date ? t.updatedAt.toISOString() : t.updatedAt
+      }));
+
+      const response = await fetch(`/api/pages/${pageId}/todos/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ todos: todosData })
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        console.log(`Synced ${result.count} todos to backend`);
+        return result.count;
+      }
+    } catch (error) {
+      console.warn('Failed to sync todos to backend:', error);
+    }
+    return 0;
+  },
+
+  /**
+   * Sync todos from backend to local IndexedDB
+   */
+  async syncFromBackend(pageId) {
+    try {
+      const backendAvailable = await isBackendAvailable();
+      if (!backendAvailable) return 0;
+
+      const response = await fetch(`/api/pages/${pageId}/todos`);
+      if (!response.ok) return 0;
+
+      const result = await response.json();
+      if (result.success && result.todos && Array.isArray(result.todos)) {
+        // Clear local todos for this page and replace with backend data
+        await db.todos.where('pageId').equals(pageId).delete();
+
+        for (const todo of result.todos) {
+          await db.todos.put({
+            id: todo.id,
+            pageId: todo.pageId,
+            content: todo.content,
+            category: todo.category,
+            deadline: todo.deadline,
+            priority: todo.priority,
+            assignee: todo.assignee,
+            completed: todo.completed,
+            needsReminder: todo.needsReminder,
+            createdAt: new Date(todo.createdAt),
+            updatedAt: new Date(todo.updatedAt)
+          });
+        }
+
+        console.log(`Synced ${result.todos.length} todos from backend`);
+        return result.todos.length;
+      }
+    } catch (error) {
+      console.warn('Failed to sync todos from backend:', error);
+    }
+    return 0;
   }
 };
 
