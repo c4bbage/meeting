@@ -72,6 +72,7 @@ function RecordingView() {
     const streamingLastSourceRef = useRef('');
 
     // Initialize services
+    // Initialize services
     useEffect(() => {
         audioRecorderRef.current = new AudioRecorderService();
         speechServiceRef.current = new SpeechRecognitionService();
@@ -81,15 +82,32 @@ function RecordingView() {
         // Load audio devices
         loadAudioDevices();
 
+        // Check if we need to recover state (user navigated away and came back)
+        if (isRecording && activeRecordingPageId) {
+            console.log('🔄 Recovering recording view state...');
+            // Re-attach visualizer
+            startAudioVisualization();
+
+            // Re-bind speech recognition callbacks if they are running in background
+            setupSpeechRecognition(activeRecordingPageId);
+
+            if (useWhisper && whisperAvailable && webSocketServiceRef.current) {
+                // Re-bind websocket callbacks
+                setupStreamingRecognition(activeRecordingPageId);
+            }
+        }
+
         return () => {
-            if (audioRecorderRef.current) {
-                audioRecorderRef.current.stop();
-            }
-            if (speechServiceRef.current) {
-                speechServiceRef.current.stop();
-            }
-            if (webSocketServiceRef.current) {
-                webSocketServiceRef.current.disconnect();
+            // Only stop everything if we are NOT recording
+            // If we are recording, we want services to stay alive in background
+            if (!useRecordingStore.getState().isRecording) {
+                if (audioRecorderRef.current) audioRecorderRef.current.stop();
+                if (speechServiceRef.current) speechServiceRef.current.stop();
+                if (webSocketServiceRef.current) webSocketServiceRef.current.disconnect();
+
+                if (visualizerAnimationRef.current) {
+                    cancelAnimationFrame(visualizerAnimationRef.current);
+                }
             }
             clearStreamingCommitTimer();
         };
@@ -726,6 +744,7 @@ function RecordingView() {
                 : webSpeechSegments;
 
             const text = segments.map(s => s.text).join(' ');
+            console.log(`🤖 AI Assistant Request: sending ${text.length} chars from ${segments.length} segments`);
 
             if (!text || text.length < 10) {
                 setAssistantContent('⚠️ 内容太少，请再说几句...');

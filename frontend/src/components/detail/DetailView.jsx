@@ -327,13 +327,21 @@ function DetailView() {
                         <div>❌ 无音频</div>
                     )}
                 </div>
-                <div className="audio-actions mt-sm">
+                <div className="audio-actions mt-sm" style={{ display: 'flex', gap: '8px' }}>
                     <button
                         className="btn btn-sm btn-secondary"
                         onClick={handleDownloadAudio}
                         disabled={!audioUrl}
                     >
-                        💾 下载音频
+                        💾 下载原音 (WebM)
+                    </button>
+                    <button
+                        className="btn btn-sm btn-secondary"
+                        onClick={() => window.open(`/api/pages/${id}/export/mp3`, '_blank')}
+                        disabled={!page}
+                        title="导出为 MP3 格式（含时长信息）"
+                    >
+                        🎵 导出 MP3
                     </button>
                 </div>
             </div>

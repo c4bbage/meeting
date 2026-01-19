@@ -83,7 +83,28 @@ export const usePageStore = create((set, get) => ({
     },
 
     // Gemini
-    setGeminiAvailable: (available) => set({ geminiAvailable: available }),
+    // Gemini polling
+    pollingInterval: null,
+
+    startGeminiPolling: () => {
+        const { pollingInterval, checkGeminiStatus } = get();
+        if (pollingInterval) return;
+
+        // Immediate check
+        checkGeminiStatus();
+
+        // Poll every 30 seconds
+        const interval = setInterval(checkGeminiStatus, 30000);
+        set({ pollingInterval: interval });
+    },
+
+    stopGeminiPolling: () => {
+        const { pollingInterval } = get();
+        if (pollingInterval) {
+            clearInterval(pollingInterval);
+            set({ pollingInterval: null });
+        }
+    },
 
     checkGeminiStatus: async () => {
         try {
@@ -91,8 +112,9 @@ export const usePageStore = create((set, get) => ({
             const data = await response.json();
             set({ geminiAvailable: data.available });
         } catch (error) {
-            console.error('Failed to check Gemini status:', error);
+            console.warn('Failed to check Gemini status:', error);
             set({ geminiAvailable: false });
         }
     }
 }));
+

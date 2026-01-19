@@ -243,11 +243,60 @@ async def get_audio(page_id: str):
     if not chunk_files:
         raise HTTPException(status_code=404, detail="Audio not found")
 
-    def chunk_key(path: Path):
-        stem = path.stem
+    # Combine chunks on the fly involves complexity, let's suggest using export for full file
+    # Or for now, just return 404 if no full recording. 
+    # Usually frontend uploads full recording on stop.
+    raise HTTPException(status_code=404, detail="Full audio recording not finalized yet. Please try Export MP3.")
+
+
+@app.get("/api/pages/{page_id}/export/mp3")
+async def export_mp3(page_id: str):
+    """Convert and export audio as MP3 using ffmpeg"""
+    import subprocess
+    
+    data_dir = Path("data") / page_id
+    input_path = data_dir / "recording.webm"
+    output_path = data_dir / "recording.mp3"
+    
+    if not input_path.exists():
+        # Check for chunks?
+        chunks_dir = data_dir / "chunks"
+        if chunks_dir.exists() and list(chunks_dir.glob("chunk_*.webm")):
+            # TODO: Merge chunks first. For now, rely on client uploading full blob.
+            pass
+        raise HTTPException(status_code=404, detail="Source audio recording not found")
+
+    # If MP3 doesn't exist or is older than WebM, convert it
+    if not output_path.exists() or output_path.stat().st_mtime < input_path.stat().st_mtime:
         try:
-            return int(stem.split("_", 1)[1])
-        except (IndexError, ValueError):
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(input_path),
+                "-codec:a", "libmp3lame",
+                
+                # High quality settings
+                "-qscale:a", "2", 
+                
+                # Write duration/metadata
+                "-write_xing", "0", 
+                
+                str(output_path)
+            ]
+            
+            # Run ffmpeg
+            result = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            
+        except subprocess.CalledProcessError as e:
+            print(f"FFmpeg error: {e.stderr.decode()}")
+            raise HTTPException(status_code=500, detail="Audio conversion failed")
+            
+    return FileResponse(
+        output_path, 
+        media_type="audio/mpeg", 
+        filename=f"meeting_{page_id}.mp3"
+    )
+
+
             return stem
 
     chunk_files.sort(key=chunk_key)

@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useRecordingStore } from '../../store/recordingStore';
 import { usePageStore } from '../../store/pageStore';
@@ -5,12 +6,18 @@ import { usePageStore } from '../../store/pageStore';
 function Header() {
     const navigate = useNavigate();
     const location = useLocation();
-    const isRecording = useRecordingStore(state => state.isRecording);
-    const activeRecordingPageId = useRecordingStore(state => state.activeRecordingPageId);
-    const useWhisper = useRecordingStore(state => state.useWhisper);
-    const whisperAvailable = useRecordingStore(state => state.whisperAvailable);
-    const toggleWhisper = useRecordingStore(state => state.toggleWhisper);
-    const geminiAvailable = usePageStore(state => state.geminiAvailable);
+    const { checkGeminiStatus, geminiAvailable, startGeminiPolling, stopGeminiPolling } = usePageStore();
+    const { whisperAvailable, checkWhisperStatus, isRecording, activeRecordingPageId, useWhisper, toggleWhisper } = useRecordingStore();
+
+    // Check status on mount and start polling
+    useEffect(() => {
+        checkWhisperStatus();
+        startGeminiPolling();
+
+        return () => {
+            stopGeminiPolling();
+        };
+    }, []);
 
     const currentView = location.pathname === '/' ? 'list'
         : location.pathname.startsWith('/recording') ? 'recording'

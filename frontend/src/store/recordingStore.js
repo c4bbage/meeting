@@ -108,5 +108,30 @@ export const useRecordingStore = create((set, get) => ({
         currentVolume: 0,
         recognitionActive: false,
         streamingActive: false
-    })
+    }),
+
+    checkWhisperStatus: async () => {
+        try {
+            // Check if backend supports streaming
+            const response = await fetch('/api/whisper/status');
+            // Note: Currently backend doesn't have a dedicated /api/whisper/status endpoint,
+            // but we can infer it from the gemini/status or just assume true for now if FunASR is enabled.
+            // Or better, let's use the actual endpoint if it exists or create one.
+            // Looking at server.py, there is no /api/whisper/status.
+            // But there is /api/gemini/status which returns status of all services.
+
+            const statusResponse = await fetch('/api/gemini/status');
+            const data = await statusResponse.json();
+
+            // In server.py, polling /api/gemini/status returns:
+            // {"available": ..., "services": {"funasr": ..., "whisper": ...}}
+            // So we can check data.services.funasr === 'ready'
+
+            const funasrReady = data.services && data.services.funasr === 'ready';
+            set({ whisperAvailable: funasrReady });
+        } catch (error) {
+            console.warn('Failed to check Whisper/FunASR status:', error);
+            set({ whisperAvailable: false });
+        }
+    }
 }));
