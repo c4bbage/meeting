@@ -708,10 +708,57 @@ function RecordingView() {
         ? '🟢 LISTENING...'
         : '🟡 STANDBY';
 
+    // AI Assistant State
+    const [showAssistant, setShowAssistant] = useState(false);
+    const [assistantLoading, setAssistantLoading] = useState(false);
+    const [assistantContent, setAssistantContent] = useState(null);
+
+    const handleAIAssistant = async () => {
+        if (assistantLoading) return;
+
+        setShowAssistant(true);
+        setAssistantLoading(true);
+
+        try {
+            // Collect text
+            const segments = useWhisper && whisperAvailable && streamingSegments.length > 0
+                ? streamingSegments
+                : webSpeechSegments;
+
+            const text = segments.map(s => s.text).join(' ');
+
+            if (!text || text.length < 10) {
+                setAssistantContent('⚠️ 内容太少，请再说几句...');
+                setAssistantLoading(false);
+                return;
+            }
+
+            const response = await fetch('/api/analyze', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ transcript: text })
+            });
+
+            if (!response.ok) throw new Error('API Error');
+
+            const result = await response.json();
+            if (result.success) {
+                setAssistantContent(result.summary);
+            } else {
+                setAssistantContent('❌ 分析失败');
+            }
+        } catch (error) {
+            setAssistantContent('❌ 请求失败: ' + error.message);
+        } finally {
+            setAssistantLoading(false);
+        }
+    };
+
     return (
         <div className="recording-view">
             {isRecording && <canvas id="audio-visualizer"></canvas>}
-            <div className="recording-content">
+
+            <div className={`recording-content ${showAssistant ? 'with-assistant' : ''}`}>
                 <div className="recording-header">
                     <div className="recording-timer" id="timer">{timer}</div>
                     <div className={`status-strip ${isRecording ? 'active' : ''}`}>
@@ -777,13 +824,39 @@ function RecordingView() {
                 </div>
 
                 {isRecording && (
-                    <div className="recording-controls">
-                        <button className="btn btn-primary" onClick={handleToggleRecording}>
+                    <div className="recording-controls display-flex gap-md justify-center mt-md">
+                        <button
+                            className="btn btn-secondary btn-lg"
+                            onClick={handleAIAssistant}
+                            title="生成实时总结"
+                        >
+                            ✨ AI 助手
+                        </button>
+                        <button className="btn btn-primary btn-lg" onClick={handleToggleRecording}>
                             结束并保存
                         </button>
                     </div>
                 )}
             </div>
+
+            {/* AI Assistant Side Panel */}
+            {showAssistant && (
+                <div className="assistant-panel">
+                    <div className="assistant-header">
+                        <h3>🤖 会议助手</h3>
+                        <button className="btn-close" onClick={() => setShowAssistant(false)}>×</button>
+                    </div>
+                    <div className="assistant-body">
+                        {assistantLoading ? (
+                            <div className="loading-spinner">Thinking...</div>
+                        ) : (
+                            <div className="markdown-body" dangerouslySetInnerHTML={{
+                                __html: (assistantContent || '').replace(/\n/g, '<br>')
+                            }} />
+                        )}
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

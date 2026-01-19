@@ -2099,3 +2099,113 @@ h3 {
   border-color: var(--accent-primary);
   color: white;
 }
+
+/* ========================================
+   AI Assistant Panel
+   ======================================== */
+
+.with-assistant {
+  margin-right: 320px;
+  transition: margin-right 0.3s ease;
+}
+
+.assistant-panel {
+  position: fixed;
+  top: 64px;
+  /* Header height */
+  right: 0;
+  width: 320px;
+  height: calc(100vh - 64px);
+  background: rgba(5, 6, 20, 0.95);
+  backdrop-filter: blur(10px);
+  border-left: 1px solid var(--border-color);
+  box-shadow: -5px 0 20px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  z-index: 90;
+  animation: slideInRight 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes slideInRight {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.assistant-header {
+  padding: var(--space-md);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: rgba(0, 243, 255, 0.05);
+}
+
+.assistant-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--accent-primary);
+}
+
+.btn-close {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1.5rem;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0 var(--space-xs);
+  transition: color 0.2s;
+}
+
+.btn-close:hover {
+  color: var(--accent-error);
+}
+
+.assistant-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-md);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.assistant-body .loading-spinner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--accent-primary);
+  gap: var(--space-md);
+  font-family: 'Orbitron', monospace;
+  animation: pulse 1.5s infinite;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  margin-top: 1em;
+  margin-bottom: 0.5em;
+  color: var(--accent-secondary);
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.5em;
+  margin-bottom: 1em;
+}
+
+.markdown-body p {
+  margin-bottom: 1em;
+}
