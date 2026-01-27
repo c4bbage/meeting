@@ -591,7 +591,6 @@ function RecordingView() {
             cancelAnimationFrame(visualizerAnimationRef.current);
         }
 
-        let finalTranscribed = false;
         if (audioBlob && activeRecordingPageId) {
             await AudioService.save(activeRecordingPageId, audioBlob.blob, audioBlob.mimeType);
 
@@ -603,11 +602,33 @@ function RecordingView() {
                 status: 'completed'
             });
 
-            finalTranscribed = await runFinalTranscription(activeRecordingPageId, audioBlob.blob);
+            // ✅ 异步执行最终转录，不阻塞UI（后台执行，完成后自动刷新）
+            runFinalTranscription(activeRecordingPageId, audioBlob.blob)
+                .then(success => {
+                    if (success) {
+                        console.log('✅ 最终高精度转录完成');
+                        // 如果用户还在详情页，刷新页面以显示最终转录结果
+                        const currentPath = window.location.pathname;
+                        if (currentPath.includes(`/detail/${activeRecordingPageId}`)) {
+                            console.log('📄 刷新页面以显示最终转录结果');
+                            window.location.reload();
+                        }
+                    }
+                })
+                .catch(err => {
+                    console.warn('⚠️ 最终转录失败，将使用实时转录结果:', err);
+                });
         }
 
-        if (!finalTranscribed && activeRecordingPageId) {
-            await SegmentService.syncToBackend(activeRecordingPageId);
+        // ✅ 同步当前的实时转录段落到后端（异步执行，不阻塞）
+        if (activeRecordingPageId) {
+            SegmentService.syncToBackend(activeRecordingPageId)
+                .then(count => {
+                    if (count > 0) {
+                        console.log(`✅ 已同步 ${count} 条实时转录段落到后端`);
+                    }
+                })
+                .catch(err => console.warn('⚠️ 段落同步失败:', err));
         }
 
         setRecording(false);
