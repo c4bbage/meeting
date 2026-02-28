@@ -4,7 +4,7 @@
  */
 
 // 动态获取 API 地址
-// 1. 本地静态服务器(如 8000)转发到后端 6543
+// 1. 本地静态服务器(如 8443)转发到后端 6543
 // 2. 通过 HTTPS (Caddy/域名)使用同源
 // 3. 其他开发端口也默认指向 6543
 const API_PORT = window.location.port;
@@ -13,8 +13,8 @@ let apiPort = API_PORT;
 
 if (API_PORT === '3000' || API_PORT === '3456') {
     apiPort = '6543';
-} else if (API_PORT === '8000') {
-    apiPort = IS_HTTPS ? '8000' : '6543';
+} else if (API_PORT === '8443') {
+    apiPort = IS_HTTPS ? '8443' : '6543';
 } else if (API_PORT === '6543') {
     apiPort = '6543';
 } else if (!API_PORT) {

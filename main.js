@@ -1434,7 +1434,7 @@ async function autoAnalyzeRecording(pageId) {
 function getAPIBase() {
   const port = window.location.port;
   if (port === '3000') {
-    return `${window.location.protocol}//` + window.location.hostname + ':8000';
+    return `${window.location.protocol}//` + window.location.hostname + ':8443';
   }
   return window.location.origin;
 }

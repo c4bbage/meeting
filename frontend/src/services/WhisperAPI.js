@@ -4,7 +4,7 @@
  */
 
 // 动态获取 API 地址
-// 1. 本地静态服务器(如 8000)转发到后端 6543
+// 1. 本地静态服务器(如 8443)转发到后端 6543
 // 2. 通过 HTTPS (Caddy/域名)使用同源
 // 3. 其他开发端口也默认指向 6543
 const API_PORT = window.location.port;
@@ -13,8 +13,8 @@ let apiPort = API_PORT;
 
 if (API_PORT === '3000' || API_PORT === '3456') {
     apiPort = '6543';
-} else if (API_PORT === '8000') {
-    apiPort = IS_HTTPS ? '8000' : '6543';
+} else if (API_PORT === '8443') {
+    apiPort = IS_HTTPS ? '8443' : '6543';
 } else if (API_PORT === '6543') {
     apiPort = '6543';
 } else if (!API_PORT) {
@@ -81,6 +81,7 @@ export class WhisperAPI {
         formData.append('file', audioBlob, 'recording.webm');
         formData.append('language', language);
         formData.append('use_saved_hotwords', useSavedHotwords.toString());
+        formData.append('async_mode', 'false'); // Sync mode
 
         if (hotwords) {
             formData.append('hotwords', hotwords);
@@ -100,6 +101,50 @@ export class WhisperAPI {
             return await response.json();
         } catch (error) {
             console.error('Transcription error:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Transcribe an audio blob asynchronously (returns task ID immediately)
+     * @param {Blob} audioBlob - Audio data
+     * @param {Object} options - Transcription options
+     * @param {string} options.language - Language code (zh, en, ja)
+     * @param {string} options.hotwords - Additional hotwords (space-separated)
+     * @param {boolean} options.useSavedHotwords - Whether to use saved hotwords
+     * @returns {Promise<Object>} Task object with task_id
+     */
+    async transcribeAsync(audioBlob, options = {}) {
+        const {
+            language = 'zh',
+            hotwords = '',
+            useSavedHotwords = true
+        } = options;
+
+        const formData = new FormData();
+        formData.append('file', audioBlob, 'recording.webm');
+        formData.append('language', language);
+        formData.append('use_saved_hotwords', useSavedHotwords.toString());
+        formData.append('async_mode', 'true'); // Async mode
+
+        if (hotwords) {
+            formData.append('hotwords', hotwords);
+        }
+
+        try {
+            const response = await fetch(`${this.baseUrl}/api/transcribe`, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Transcription failed');
+            }
+
+            return await response.json();
+        } catch (error) {
+            console.error('Async transcription submission error:', error);
             throw error;
         }
     }

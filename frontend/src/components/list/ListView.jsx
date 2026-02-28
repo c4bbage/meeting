@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { usePageStore } from '../../store/pageStore';
 import { SegmentService } from '../../services/Database';
-import { formatDateTime, formatDurationHuman, truncate } from '../../utils/helpers';
+import { formatDateTime, formatRelativeTime, formatDurationHuman, truncate, downloadFile } from '../../utils/helpers';
 
 const PAGE_SIZE_OPTIONS = [6, 12, 24];
 
@@ -10,6 +10,7 @@ function ListView() {
     const navigate = useNavigate();
     const pages = usePageStore(state => state.pages);
     const loadPages = usePageStore(state => state.loadPages);
+    const deletePage = usePageStore(state => state.deletePage);
     const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[1]);
     const [pageIndex, setPageIndex] = useState(1);
     const [searchText, setSearchText] = useState('');
@@ -102,6 +103,19 @@ function ListView() {
         navigate(`/detail/${pageId}`);
     };
 
+    const handleDeletePage = async (e, pageId) => {
+        e.stopPropagation();
+        if (confirm('确定要删除这条录音吗？')) {
+            await deletePage(pageId);
+        }
+    };
+
+    const handleExportPage = async (e, page) => {
+        e.stopPropagation();
+        const content = `# ${page.title || page.autoTitle || '未命名会议'}\n\n创建时间：${formatDateTime(page.createdAt)}\n时长：${formatDurationHuman(page.duration)}\n\n## 预览\n\n${page.preview || '暂无内容'}`;
+        downloadFile(content, `meeting-${page.createdAt}.txt`, 'text/plain');
+    };
+
     const renderPageCard = (page) => {
         const title = page.title || page.autoTitle || '未命名会议';
         const preview = page.preview || '';
@@ -118,7 +132,7 @@ function ListView() {
                 <div className="card-header">
                     <div className="card-title">{title}</div>
                     <div className="card-meta">
-                        <span>📅 {formatDateTime(page.createdAt)}</span>
+                        <span title={formatDateTime(page.createdAt)}>📅 {formatRelativeTime(page.createdAt)}</span>
                         <span>⏱️ {formatDurationHuman(page.duration)}</span>
                     </div>
                 </div>
@@ -140,9 +154,25 @@ function ListView() {
                             <span>{todoCount} 项待办</span>
                         </span>
                     </div>
-                    {page.analyzed && (
-                        <span className="badge badge-success">✨ 已分析</span>
-                    )}
+                    <div className="card-actions">
+                        {page.analyzed && (
+                            <span className="badge badge-success">✨ 已分析</span>
+                        )}
+                        <button
+                            className="btn btn-sm btn-secondary"
+                            onClick={(e) => handleExportPage(e, page)}
+                            title="导出为文本"
+                        >
+                            📥
+                        </button>
+                        <button
+                            className="btn btn-sm btn-danger"
+                            onClick={(e) => handleDeletePage(e, page.id)}
+                            title="删除"
+                        >
+                            🗑️
+                        </button>
+                    </div>
                 </div>
             </div>
         );

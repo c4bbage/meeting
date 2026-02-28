@@ -37,8 +37,8 @@ export class WebSocketService {
 
         if (wsPort === '3456') {
             wsPort = '6543'; // Direct to backend
-        } else if (wsPort === '8000') {
-            wsPort = isHttps ? '8000' : '6543';
+        } else if (wsPort === '8443') {
+            wsPort = isHttps ? '8443' : '6543';
         } else if (wsPort === '6543') {
             wsPort = '6543';
         } else if (!wsPort) {
@@ -48,7 +48,7 @@ export class WebSocketService {
         }
 
         const portStr = wsPort ? `:${wsPort}` : '';
-        const wsPath = (isHttps || wsPort === '8000') ? '/api/ws/transcribe' : '/ws/transcribe';
+        const wsPath = (isHttps || wsPort === '8443') ? '/api/ws/transcribe' : '/ws/transcribe';
         return `${protocol}//${host}${portStr}${wsPath}?language=${encodeURIComponent(language)}`;
     }
 

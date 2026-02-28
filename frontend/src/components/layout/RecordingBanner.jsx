@@ -1,12 +1,14 @@
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useRecordingStore } from '../../store/recordingStore';
 import { formatDuration } from '../../utils/helpers';
 import { useEffect, useState } from 'react';
 
 function RecordingBanner() {
     const navigate = useNavigate();
+    const location = useLocation();
     const isRecording = useRecordingStore(state => state.isRecording);
     const recordingStartTime = useRecordingStore(state => state.recordingStartTime);
+    const requestStop = useRecordingStore(state => state.requestStop);
     const [duration, setDuration] = useState(0);
 
     useEffect(() => {
@@ -19,7 +21,15 @@ function RecordingBanner() {
         }
     }, [isRecording, recordingStartTime]);
 
-    if (!isRecording) return null;
+    // Don't show banner if already on recording page
+    const isOnRecordingPage = location.pathname.startsWith('/recording');
+    if (!isRecording || isOnRecordingPage) return null;
+
+    const handleStopRecording = () => {
+        // Navigate to recording page and request stop
+        requestStop();
+        navigate('/recording');
+    };
 
     return (
         <div className="recording-banner">
@@ -29,12 +39,20 @@ function RecordingBanner() {
                     <span>录音进行中</span>
                     <span className="recording-banner-timer">{formatDuration(duration)}</span>
                 </div>
-                <button
-                    className="btn btn-sm btn-secondary"
-                    onClick={() => navigate('/recording')}
-                >
-                    返回录音
-                </button>
+                <div className="recording-banner-actions">
+                    <button
+                        className="btn btn-sm btn-secondary"
+                        onClick={() => navigate('/recording')}
+                    >
+                        返回录音
+                    </button>
+                    <button
+                        className="btn btn-sm btn-danger"
+                        onClick={handleStopRecording}
+                    >
+                        停止并保存
+                    </button>
+                </div>
             </div>
         </div>
     );

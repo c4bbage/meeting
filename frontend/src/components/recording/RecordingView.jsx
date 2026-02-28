@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useRecordingStore } from '../../store/recordingStore';
 import { usePageStore } from '../../store/pageStore';
-import { PageService, SegmentService, AudioService } from '../../services/Database';
+import { PageService, SegmentService, AudioService, TodoService } from '../../services/Database';
 import { AudioRecorderService } from '../../services/AudioRecorder';
 import { SpeechRecognitionService } from '../../services/SpeechRecognition';
 import { SpeakerDiarizerService } from '../../services/SpeakerDiarizer';
@@ -46,7 +46,9 @@ function RecordingView() {
         setStreamingActive,
         toggleCompareMode,
         resetRecording,
-        clearRecording
+        clearRecording,
+        stopRequested,
+        clearStopRequest
     } = useRecordingStore();
 
     const { createPage, loadPages } = usePageStore();
@@ -54,6 +56,8 @@ function RecordingView() {
     // Local state
     const [timer, setTimer] = useState('00:00');
     const [canvasContext, setCanvasContext] = useState(null);
+    const [notes, setNotes] = useState(''); // 录音笔记
+    const [showNotes, setShowNotes] = useState(false); // 是否显示笔记面板
     const syncIntervalRef = useRef(null);
 
     // Services
@@ -126,6 +130,14 @@ function RecordingView() {
             setTimer('00:00');
         }
     }, [isRecording, recordingStartTime]);
+
+    // Handle stop request from RecordingBanner
+    useEffect(() => {
+        if (stopRequested && isRecording) {
+            clearStopRequest();
+            stopRecording();
+        }
+    }, [stopRequested, isRecording]);
 
     const loadAudioDevices = async () => {
         try {
@@ -489,14 +501,88 @@ function RecordingView() {
             const available = await whisperAPI.isAvailable();
             if (!available) return false;
 
-            const result = await whisperAPI.transcribe(audioBlob, { language: 'zh' });
-            const segments = result?.segments || [];
-            if (!segments.length) return false;
+            console.log('🎙️ Submitting transcription task to backend...');
 
-            await SegmentService.deleteByPageId(pageId);
-            await SegmentService.addFromWhisper(pageId, segments, result.engine || 'final');
-            await SegmentService.syncToBackend(pageId);
-            return true;
+            // Submit transcription as async task
+            const taskResult = await whisperAPI.transcribeAsync(audioBlob, { language: 'zh' });
+
+            if (!taskResult || !taskResult.task_id) {
+                console.warn('Failed to submit transcription task');
+                return false;
+            }
+
+            const taskId = taskResult.task_id;
+            console.log(`📋 Transcription task created: ${taskId}`);
+
+            // Poll for task completion
+            const pollInterval = 2000; // 2 seconds
+            const maxAttempts = 60; // Max 2 minutes
+            let attempts = 0;
+
+            const pollTask = async () => {
+                try {
+                    const response = await fetch(`/api/tasks/${taskId}`);
+                    if (!response.ok) {
+                        throw new Error(`Task query failed: ${response.status}`);
+                    }
+
+                    const task = await response.json();
+                    console.log(`📊 Task status: ${task.status} (${task.progress || 0}%)`);
+
+                    if (task.status === 'completed') {
+                        console.log('✅ Transcription completed successfully');
+
+                        // Save final transcription with version='final'
+                        const result = task.result;
+                        const segments = result?.segments || [];
+
+                        // Validate: only replace if we have meaningful results
+                        const currentCount = await SegmentService.getFinalByPageId(pageId).then(s => s.length);
+                        const shouldReplace = segments.length >= Math.max(1, currentCount * 0.5);
+
+                        if (shouldReplace && segments.length > 0) {
+                            console.log(`🔄 Saving final transcription (${segments.length} segments)`); await SegmentService.addFromWhisper(pageId, segments, result.engine || 'final');
+                            await SegmentService.syncToBackend(pageId, { version: 'final' });
+
+                            // Trigger AI fusion in background
+                            try {
+                                const fuseResult = await SegmentService.fusionTranscripts(pageId, true);
+                                console.log(`🔄 AI Fusion task created: ${fuseResult.task_id}`);
+                            } catch (error) {
+                                console.warn('Failed to trigger AI fusion:', error);
+                            }
+                        } else {
+                            console.warn('⚠️ Final transcription incomplete, keeping realtime segments');
+                        }
+
+                        return true;
+                    } else if (task.status === 'failed') {
+                        console.error('❌ Transcription failed:', task.error);
+                        return false;
+                    } else if (task.status === 'processing' || task.status === 'pending') {
+                        attempts++;
+                        if (attempts >= maxAttempts) {
+                            console.warn('⏱️ Transcription timeout (exceeded max polling attempts)');
+                            return false;
+                        }
+
+                        // Continue polling
+                        await new Promise(resolve => setTimeout(resolve, pollInterval));
+                        return pollTask();
+                    }
+                } catch (error) {
+                    console.warn('Poll error:', error);
+                    attempts++;
+                    if (attempts >= maxAttempts) {
+                        return false;
+                    }
+                    await new Promise(resolve => setTimeout(resolve, pollInterval));
+                    return pollTask();
+                }
+            };
+
+            return await pollTask();
+
         } catch (error) {
             console.warn('Final transcription failed:', error);
             return false;
@@ -594,13 +680,34 @@ function RecordingView() {
         if (audioBlob && activeRecordingPageId) {
             await AudioService.save(activeRecordingPageId, audioBlob.blob, audioBlob.mimeType);
 
+            // Auto-upload audio to backend for cross-device access
+            try {
+                const formData = new FormData();
+                formData.append('file', audioBlob.blob, 'recording.webm');
+                const uploadRes = await fetch(`/api/pages/${activeRecordingPageId}/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+                if (uploadRes.ok) {
+                    console.log('✅ Audio auto-uploaded to backend');
+                }
+            } catch (err) {
+                console.warn('⚠️ Audio auto-upload failed (can sync later):', err);
+            }
+
             const duration = recordingStartTime
                 ? Math.round((Date.now() - recordingStartTime) / 1000)
                 : 0;
-            await PageService.update(activeRecordingPageId, {
+
+            // 保存笔记和状态
+            const updateData = {
                 duration,
                 status: 'completed'
-            });
+            };
+            if (notes.trim()) {
+                updateData.notes = notes.trim();
+            }
+            await PageService.update(activeRecordingPageId, updateData);
 
             // ✅ 异步执行最终转录，不阻塞UI（后台执行，完成后自动刷新）
             runFinalTranscription(activeRecordingPageId, audioBlob.blob)
@@ -620,15 +727,28 @@ function RecordingView() {
                 });
         }
 
-        // ✅ 同步当前的实时转录段落到后端（异步执行，不阻塞）
+        // ✅ 分别同步三份转录到后端（Web Speech + Streaming + 最终转录）
         if (activeRecordingPageId) {
-            SegmentService.syncToBackend(activeRecordingPageId)
+            // 1. 同步 Web Speech 实时转录
+            SegmentService.syncBySourceToBackend(activeRecordingPageId, 'web_speech', 'web_speech')
                 .then(count => {
-                    if (count > 0) {
-                        console.log(`✅ 已同步 ${count} 条实时转录段落到后端`);
-                    }
+                    if (count > 0) console.log(`✅ 已同步 ${count} 条 Web Speech 转录`);
                 })
-                .catch(err => console.warn('⚠️ 段落同步失败:', err));
+                .catch(err => console.warn('⚠️ Web Speech 同步失败:', err));
+
+            // 2. 同步 FunASR Streaming 转录
+            SegmentService.syncBySourceToBackend(activeRecordingPageId, 'streaming', 'streaming')
+                .then(count => {
+                    if (count > 0) console.log(`✅ 已同步 ${count} 条 Streaming 转录`);
+                })
+                .catch(err => console.warn('⚠️ Streaming 同步失败:', err));
+
+            // 3. 同时保存一份合并的 realtime 版本（兼容旧逻辑）
+            SegmentService.syncToBackend(activeRecordingPageId, { version: 'realtime' })
+                .then(count => {
+                    if (count > 0) console.log(`✅ 已同步 ${count} 条合并实时转录`);
+                })
+                .catch(err => console.warn('⚠️ 合并同步失败:', err));
         }
 
         setRecording(false);
@@ -690,6 +810,8 @@ function RecordingView() {
         setSelectedDeviceId(deviceId);
     };
 
+    const LOW_CONFIDENCE_THRESHOLD = 0.6;
+
     const renderTranscript = () => {
         const segments = useWhisper && whisperAvailable && streamingSegments.length > 0
             ? streamingSegments
@@ -726,7 +848,16 @@ function RecordingView() {
         `;
             }
 
-            html += `<span class="segment-text">${escapeHtml(seg.text)} </span>`;
+            // Add low confidence highlighting
+            const isLowConfidence = typeof seg.confidence === 'number'
+                && seg.confidence > 0
+                && seg.confidence < LOW_CONFIDENCE_THRESHOLD;
+            const confidenceClass = isLowConfidence ? ' low-confidence' : '';
+            const confidenceTitle = isLowConfidence
+                ? ` title="置信度 ${(seg.confidence * 100).toFixed(0)}%"`
+                : '';
+
+            html += `<span class="segment-text${confidenceClass}"${confidenceTitle}>${escapeHtml(seg.text)} </span>`;
             lastSpeaker = seg.speaker;
         });
 
@@ -895,6 +1026,13 @@ function RecordingView() {
                 {isRecording && (
                     <div className="recording-controls display-flex gap-md justify-center mt-md">
                         <button
+                            className={`btn btn-lg ${showNotes ? 'btn-primary' : 'btn-secondary'}`}
+                            onClick={() => setShowNotes(!showNotes)}
+                            title="记录笔记"
+                        >
+                            📝 笔记 {notes.length > 0 && `(${notes.length}字)`}
+                        </button>
+                        <button
                             className="btn btn-secondary btn-lg"
                             onClick={handleAIAssistant}
                             title="生成实时总结"
@@ -904,6 +1042,23 @@ function RecordingView() {
                         <button className="btn btn-primary btn-lg" onClick={handleToggleRecording}>
                             结束并保存
                         </button>
+                    </div>
+                )}
+
+                {/* Notes Panel */}
+                {showNotes && isRecording && (
+                    <div className="notes-panel">
+                        <div className="notes-header">
+                            <h4>📝 会议笔记</h4>
+                            <span className="text-muted text-sm">边听边记，AI 总结时会参考这些内容</span>
+                        </div>
+                        <textarea
+                            className="notes-textarea"
+                            placeholder="在这里记录重要内容、想法、待办事项...&#10;&#10;例如:&#10;- 讨论了XX项目的进度&#10;- 需要跟进XX事项&#10;- 关键决定: ..."
+                            value={notes}
+                            onChange={(e) => setNotes(e.target.value)}
+                            autoFocus
+                        />
                     </div>
                 )}
             </div>

@@ -16,7 +16,11 @@ const API_BASE = (API_PORT === '3000' || API_PORT === '3456')
  */
 async function isBackendAvailable() {
     try {
-        const response = await fetch(`${API_BASE}/health`, {
+        // Health endpoint is at /health (not /api/health)
+        const healthUrl = API_BASE.endsWith('/api')
+            ? API_BASE.replace(/\/api$/, '/health')
+            : `${API_BASE}/health`;
+        const response = await fetch(healthUrl, {
             signal: AbortSignal.timeout(2000)
         });
         return response.ok;
@@ -58,7 +62,16 @@ export const PageSync = {
                     createdAt: page.createdAt instanceof Date ? page.createdAt.toISOString() : page.createdAt,
                     duration: page.duration || 0,
                     status: page.status || 'recording',
-                    language: page.language || 'zh-CN'
+                    language: page.language || 'zh-CN',
+                    notes: page.notes || null,
+                    autoTitle: page.autoTitle || null,
+                    summary: page.summary || null,
+                    keyPoints: page.keyPoints || null,
+                    decisions: page.decisions || null,
+                    todos: page.todos || null,
+                    todoCount: page.todoCount || 0,
+                    wordCount: page.wordCount || 0,
+                    analyzed: page.analyzed || false
                 })
             });
             if (!response.ok) throw new Error('Failed to create page');
@@ -75,10 +88,22 @@ export const PageSync = {
      */
     async update(pageId, updates) {
         try {
+            // Only send fields that PageUpdate model accepts, strip Date objects and unknown fields
+            const allowedFields = [
+                'title', 'duration', 'status', 'language', 'autoTitle',
+                'summary', 'keyPoints', 'decisions', 'todos', 'todoCount',
+                'wordCount', 'analyzed', 'notes'
+            ];
+            const cleanData = {};
+            for (const key of allowedFields) {
+                if (key in updates && updates[key] !== undefined) {
+                    cleanData[key] = updates[key];
+                }
+            }
             const response = await fetch(`${API_BASE}/pages/${pageId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(updates)
+                body: JSON.stringify(cleanData)
             });
             if (!response.ok) throw new Error('Failed to update page');
             const data = await response.json();
@@ -94,7 +119,7 @@ export const PageSync = {
      */
     async delete(pageId) {
         try {
-            const response = await fetch(`${API_BASE}/api/pages/${pageId}`, {
+            const response = await fetch(`${API_BASE}/pages/${pageId}`, {
                 method: 'DELETE'
             });
             return response.ok;
@@ -125,11 +150,15 @@ export const SegmentSync = {
     },
 
     /**
-     * Bulk save segments to backend
+     * Bulk save segments to backend with version support
+     * @param {string} pageId - The page ID
+     * @param {Array} segments - Segments to save
+     * @param {string} version - Transcript version ('realtime', 'final', 'fused')
      */
-    async saveAll(pageId, segments) {
+    async saveAll(pageId, segments, version = 'realtime') {
         try {
-            const response = await fetch(`${API_BASE}/pages/${pageId}/segments`, {
+            const url = `${API_BASE}/pages/${pageId}/segments?version=${version}`;
+            const response = await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

@@ -2,8 +2,8 @@
     # 内网使用，无需 email
 }
 
-# Caddy listening on port 8000 (HTTPS)
-:8000 {
+# Caddy listening on port 8443 (HTTPS)
+:8443 {
     # Use local certificates
     tls .ssl/cert.pem .ssl/key.pem
     # 後端 API 反向代理 (Port 6543)

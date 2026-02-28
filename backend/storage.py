@@ -58,6 +58,7 @@ def init_db():
                 todo_count INTEGER DEFAULT 0,
                 word_count INTEGER DEFAULT 0,
                 analyzed INTEGER DEFAULT 0,
+                notes TEXT DEFAULT NULL,
                 deleted_at TEXT DEFAULT NULL
             )
         """)
@@ -77,6 +78,7 @@ def init_db():
                 speaker_color TEXT,
                 words TEXT,
                 source TEXT DEFAULT 'web_speech',
+                transcript_version TEXT DEFAULT 'realtime',
                 created_at TEXT NOT NULL,
                 deleted_at TEXT DEFAULT NULL,
                 FOREIGN KEY (page_id) REFERENCES pages(id)
@@ -106,6 +108,7 @@ def init_db():
                 assignee TEXT,
                 completed INTEGER DEFAULT 0,
                 needs_reminder INTEGER DEFAULT 0,
+                notes TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 deleted_at TEXT DEFAULT NULL,
@@ -113,6 +116,19 @@ def init_db():
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_todos_page_id ON todos(page_id)")
+
+        # Reviews table (daily review notes)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS reviews (
+                id TEXT PRIMARY KEY,
+                date TEXT NOT NULL UNIQUE,
+                note TEXT NOT NULL,
+                stats TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_reviews_date ON reviews(date)")
 
         # Create indexes
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_segments_page_id ON segments(page_id)")
@@ -129,11 +145,38 @@ def init_db():
             "todos": "TEXT DEFAULT NULL",
             "todo_count": "INTEGER DEFAULT 0",
             "word_count": "INTEGER DEFAULT 0",
-            "analyzed": "INTEGER DEFAULT 0"
+            "analyzed": "INTEGER DEFAULT 0",
+            "transcript_versions": "TEXT DEFAULT NULL",
+            "active_version": "TEXT DEFAULT 'realtime'",
+            "notes": "TEXT DEFAULT NULL"
         }
         for column, definition in columns_to_add.items():
             if column not in existing_columns:
                 cursor.execute(f"ALTER TABLE pages ADD COLUMN {column} {definition}")
+        
+        # Ensure segments table has transcript_version column
+        cursor.execute("PRAGMA table_info(segments)")
+        seg_columns = {row[1] for row in cursor.fetchall()}
+        if 'transcript_version' not in seg_columns:
+            cursor.execute("ALTER TABLE segments ADD COLUMN transcript_version TEXT DEFAULT 'realtime'")
+            # Migrate existing data: mark all existing segments as 'realtime'
+            cursor.execute("UPDATE segments SET transcript_version = 'realtime' WHERE transcript_version IS NULL")
+
+        # Ensure todos table has notes column
+        cursor.execute("PRAGMA table_info(todos)")
+        todo_columns = {row[1] for row in cursor.fetchall()}
+        if 'notes' not in todo_columns:
+            cursor.execute("ALTER TABLE todos ADD COLUMN notes TEXT DEFAULT ''")
+        if 'parent_id' not in todo_columns:
+            cursor.execute("ALTER TABLE todos ADD COLUMN parent_id TEXT DEFAULT NULL")
+        if 'sort_order' not in todo_columns:
+            cursor.execute("ALTER TABLE todos ADD COLUMN sort_order INTEGER DEFAULT 0")
+        if 'related_ids' not in todo_columns:
+            cursor.execute("ALTER TABLE todos ADD COLUMN related_ids TEXT DEFAULT NULL")
+        if 'dismissed' not in todo_columns:
+            cursor.execute("ALTER TABLE todos ADD COLUMN dismissed INTEGER DEFAULT 0")
+        if 'attachments' not in todo_columns:
+            cursor.execute("ALTER TABLE todos ADD COLUMN attachments TEXT DEFAULT NULL")
 
 
 # Initialize on import
@@ -175,9 +218,9 @@ class PageStorage:
             cursor.execute("""
                 INSERT INTO pages (
                     id, title, created_at, updated_at, duration, status, language,
-                    auto_title, summary, key_points, decisions, todos, todo_count, word_count, analyzed
+                    auto_title, summary, key_points, decisions, todos, todo_count, word_count, analyzed, notes
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 page_data.get('id'),
                 page_data.get('title') or '未命名录音',
@@ -193,7 +236,8 @@ class PageStorage:
                 todos,
                 page_data.get('todoCount') or 0,
                 page_data.get('wordCount') or 0,
-                analyzed
+                analyzed,
+                page_data.get('notes')
             ))
         return PageStorage.get_by_id(page_data['id'])
     
@@ -251,6 +295,13 @@ class PageStorage:
                 elif key == 'analyzed':
                     db_key = 'analyzed'
                     value = 1 if value else 0
+                elif key == 'transcriptVersions':
+                    db_key = 'transcript_versions'
+                    value = _serialize_json(value)
+                elif key == 'activeVersion':
+                    db_key = 'active_version'
+                elif key == 'notes':
+                    db_key = 'notes'
                 else:
                     continue
                 fields.append(f"{db_key} = ?")
@@ -304,6 +355,9 @@ class PageStorage:
             'todoCount': _row_value(row, 'todo_count', 0),
             'wordCount': _row_value(row, 'word_count', 0),
             'analyzed': bool(_row_value(row, 'analyzed', 0)),
+            'transcriptVersions': _parse_json(_row_value(row, 'transcript_versions'), {}),
+            'activeVersion': _row_value(row, 'active_version', 'realtime'),
+            'notes': _row_value(row, 'notes'),
             'deletedAt': row['deleted_at']
         }
 
@@ -321,8 +375,8 @@ class SegmentStorage:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO segments (id, page_id, text, timestamp, end_time, confidence, 
-                    is_final, speaker, speaker_label, speaker_color, words, source, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_final, speaker, speaker_label, speaker_color, words, source, transcript_version, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 segment_data.get('id'),
                 segment_data.get('pageId'),
@@ -336,26 +390,30 @@ class SegmentStorage:
                 segment_data.get('speakerColor'),
                 words_json,
                 segment_data.get('source', 'web_speech'),
+                segment_data.get('transcriptVersion', 'realtime'),
                 now
             ))
         return segment_data
     
     @staticmethod
-    def bulk_create(page_id: str, segments: List[Dict[str, Any]]) -> int:
-        """Bulk create segments for a page."""
+    def bulk_create(page_id: str, segments: List[Dict[str, Any]], transcript_version: str = 'realtime') -> int:
+        """Bulk create segments for a page with specific transcript version."""
         now = datetime.now().isoformat()
         with get_connection() as conn:
             cursor = conn.cursor()
             
-            # Delete existing segments for this page first (replace strategy)
-            cursor.execute("DELETE FROM segments WHERE page_id = ?", (page_id,))
+            # Delete existing segments for this page+version first (replace strategy)
+            cursor.execute(
+                "DELETE FROM segments WHERE page_id = ? AND transcript_version = ?",
+                (page_id, transcript_version)
+            )
             
             for seg in segments:
                 words_json = json.dumps(seg.get('words')) if seg.get('words') else None
                 cursor.execute("""
                     INSERT INTO segments (id, page_id, text, timestamp, end_time, confidence,
-                        is_final, speaker, speaker_label, speaker_color, words, source, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        is_final, speaker, speaker_label, speaker_color, words, source, transcript_version, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     seg.get('id'),
                     page_id,
@@ -369,22 +427,36 @@ class SegmentStorage:
                     seg.get('speakerColor'),
                     words_json,
                     seg.get('source', 'web_speech'),
+                    transcript_version,
                     now
                 ))
         return len(segments)
     
     @staticmethod
-    def get_by_page_id(page_id: str, include_deleted: bool = False) -> List[Dict[str, Any]]:
-        """Get all segments for a page."""
+    def get_by_page_id(page_id: str, transcript_version: str = None, include_deleted: bool = False) -> List[Dict[str, Any]]:
+        """Get segments for a page, optionally filtered by transcript version."""
         with get_connection() as conn:
             cursor = conn.cursor()
-            if include_deleted:
-                cursor.execute("SELECT * FROM segments WHERE page_id = ? ORDER BY timestamp", (page_id,))
+            
+            if transcript_version:
+                if include_deleted:
+                    cursor.execute(
+                        "SELECT * FROM segments WHERE page_id = ? AND transcript_version = ? ORDER BY timestamp",
+                        (page_id, transcript_version)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT * FROM segments WHERE page_id = ? AND transcript_version = ? AND deleted_at IS NULL ORDER BY timestamp",
+                        (page_id, transcript_version)
+                    )
             else:
-                cursor.execute(
-                    "SELECT * FROM segments WHERE page_id = ? AND deleted_at IS NULL ORDER BY timestamp",
-                    (page_id,)
-                )
+                if include_deleted:
+                    cursor.execute("SELECT * FROM segments WHERE page_id = ? ORDER BY timestamp", (page_id,))
+                else:
+                    cursor.execute(
+                        "SELECT * FROM segments WHERE page_id = ? AND deleted_at IS NULL ORDER BY timestamp",
+                        (page_id,)
+                    )
             rows = cursor.fetchall()
             return [SegmentStorage._row_to_dict(row) for row in rows]
 
@@ -414,11 +486,17 @@ class SegmentStorage:
             return [row["page_id"] for row in rows]
     
     @staticmethod
-    def delete_by_page_id(page_id: str) -> int:
-        """Hard delete all segments for a page."""
+    def delete_by_page_id(page_id: str, transcript_version: str = None) -> int:
+        """Hard delete segments for a page, optionally filtered by version."""
         with get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM segments WHERE page_id = ?", (page_id,))
+            if transcript_version:
+                cursor.execute(
+                    "DELETE FROM segments WHERE page_id = ? AND transcript_version = ?",
+                    (page_id, transcript_version)
+                )
+            else:
+                cursor.execute("DELETE FROM segments WHERE page_id = ?", (page_id,))
             return cursor.rowcount
     
     @staticmethod
@@ -444,6 +522,7 @@ class SegmentStorage:
             'speakerColor': row['speaker_color'],
             'words': words,
             'source': row['source'],
+            'transcriptVersion': _row_value(row, 'transcript_version', 'realtime'),
             'createdAt': row['created_at']
         }
 
@@ -517,14 +596,17 @@ class TodoStorage:
     def create(todo_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new todo."""
         now = datetime.now().isoformat()
+        related_ids = _serialize_json(todo_data.get('relatedIds'))
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO todos (
                     id, page_id, content, category, deadline, priority,
-                    assignee, completed, needs_reminder, created_at, updated_at
+                    assignee, completed, needs_reminder, notes,
+                    parent_id, sort_order, related_ids, dismissed, attachments,
+                    created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 todo_data.get('id'),
                 todo_data.get('pageId'),
@@ -535,6 +617,12 @@ class TodoStorage:
                 todo_data.get('assignee'),
                 1 if todo_data.get('completed') else 0,
                 1 if todo_data.get('needsReminder') else 0,
+                todo_data.get('notes', ''),
+                todo_data.get('parentId'),
+                todo_data.get('sortOrder', 0),
+                related_ids,
+                1 if todo_data.get('dismissed') else 0,
+                _serialize_json(todo_data.get('attachments')),
                 todo_data.get('createdAt') or now,
                 now
             ))
@@ -548,6 +636,17 @@ class TodoStorage:
             cursor.execute("SELECT * FROM todos WHERE id = ? AND deleted_at IS NULL", (todo_id,))
             row = cursor.fetchone()
             return TodoStorage._row_to_dict(row) if row else None
+
+    @staticmethod
+    def get_all() -> List[Dict[str, Any]]:
+        """Get all todos across all pages."""
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM todos WHERE deleted_at IS NULL ORDER BY created_at DESC"
+            )
+            rows = cursor.fetchall()
+            return [TodoStorage._row_to_dict(row) for row in rows]
 
     @staticmethod
     def get_by_page_id(page_id: str) -> List[Dict[str, Any]]:
@@ -592,6 +691,24 @@ class TodoStorage:
                 elif key == 'needsReminder':
                     fields.append("needs_reminder = ?")
                     values.append(1 if value else 0)
+                elif key == 'notes':
+                    fields.append("notes = ?")
+                    values.append(value or '')
+                elif key == 'parentId':
+                    fields.append("parent_id = ?")
+                    values.append(value)
+                elif key == 'sortOrder':
+                    fields.append("sort_order = ?")
+                    values.append(value or 0)
+                elif key == 'relatedIds':
+                    fields.append("related_ids = ?")
+                    values.append(_serialize_json(value))
+                elif key == 'dismissed':
+                    fields.append("dismissed = ?")
+                    values.append(1 if value else 0)
+                elif key == 'attachments':
+                    fields.append("attachments = ?")
+                    values.append(_serialize_json(value))
 
             if fields:
                 fields.append("updated_at = ?")
@@ -629,12 +746,14 @@ class TodoStorage:
 
             # Insert new todos
             for todo in todos:
+                related_ids = _serialize_json(todo.get('relatedIds'))
                 cursor.execute("""
                     INSERT INTO todos (
                         id, page_id, content, category, deadline, priority,
-                        assignee, completed, needs_reminder, created_at, updated_at
+                        assignee, completed, needs_reminder, notes,
+                        parent_id, sort_order, related_ids, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     todo.get('id'),
                     page_id,
@@ -645,11 +764,28 @@ class TodoStorage:
                     todo.get('assignee'),
                     1 if todo.get('completed') else 0,
                     1 if todo.get('needsReminder') else 0,
+                    todo.get('notes', ''),
+                    todo.get('parentId'),
+                    todo.get('sortOrder', 0),
+                    related_ids,
                     todo.get('createdAt') or now,
                     todo.get('updatedAt') or now
                 ))
 
         return len(todos)
+
+    @staticmethod
+    def batch_update_sort_order(updates: List[Dict[str, Any]]) -> int:
+        """Batch update sort_order for multiple todos."""
+        now = datetime.now().isoformat()
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            for item in updates:
+                cursor.execute(
+                    "UPDATE todos SET sort_order = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+                    (item.get('sortOrder', 0), now, item.get('id'))
+                )
+        return len(updates)
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
@@ -664,6 +800,76 @@ class TodoStorage:
             'assignee': row['assignee'],
             'completed': bool(row['completed']),
             'needsReminder': bool(row['needs_reminder']),
+            'notes': row['notes'] if 'notes' in row.keys() else '',
+            'parentId': _row_value(row, 'parent_id'),
+            'sortOrder': _row_value(row, 'sort_order', 0),
+            'relatedIds': _parse_json(_row_value(row, 'related_ids'), []),
+            'dismissed': bool(_row_value(row, 'dismissed', 0)),
+            'attachments': _parse_json(_row_value(row, 'attachments'), []),
+            'createdAt': row['created_at'],
+            'updatedAt': row['updated_at']
+        }
+
+
+class ReviewStorage:
+    """Daily review CRUD operations."""
+
+    @staticmethod
+    def create(review_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new daily review."""
+        now = datetime.now().isoformat()
+        review_id = review_data.get('id') or f"review_{review_data.get('date')}"
+        stats_json = _serialize_json(review_data.get('stats'))
+
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO reviews (id, date, note, stats, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                review_id,
+                review_data.get('date'),
+                review_data.get('note', ''),
+                stats_json,
+                review_data.get('createdAt') or now,
+                now
+            ))
+        return ReviewStorage.get_by_date(review_data['date'])
+
+    @staticmethod
+    def get_by_date(date: str) -> Optional[Dict[str, Any]]:
+        """Get review by date."""
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM reviews WHERE date = ?", (date,))
+            row = cursor.fetchone()
+            return ReviewStorage._row_to_dict(row) if row else None
+
+    @staticmethod
+    def get_all() -> List[Dict[str, Any]]:
+        """Get all reviews."""
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM reviews ORDER BY date DESC")
+            rows = cursor.fetchall()
+            return [ReviewStorage._row_to_dict(row) for row in rows]
+
+    @staticmethod
+    def delete(date: str) -> bool:
+        """Delete a review by date."""
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM reviews WHERE date = ?", (date,))
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+        """Convert sqlite row to dict."""
+        return {
+            'id': row['id'],
+            'date': row['date'],
+            'note': row['note'],
+            'stats': _parse_json(row['stats'], {}),
             'createdAt': row['created_at'],
             'updatedAt': row['updated_at']
         }

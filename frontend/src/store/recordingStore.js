@@ -9,6 +9,7 @@ export const useRecordingStore = create((set, get) => ({
     recordingStartTime: null,
     activeRecordingPageId: null,
     isStoppingRecording: false,
+    stopRequested: false,
 
     // Transcription
     currentTranscript: '',
@@ -38,6 +39,10 @@ export const useRecordingStore = create((set, get) => ({
     setRecordingStartTime: (time) => set({ recordingStartTime: time }),
 
     setActiveRecordingPageId: (id) => set({ activeRecordingPageId: id }),
+
+    requestStop: () => set({ stopRequested: true }),
+
+    clearStopRequest: () => set({ stopRequested: false }),
 
     addWebSpeechSegment: (segment) => set(state => ({
         webSpeechSegments: [...state.webSpeechSegments, segment]

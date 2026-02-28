@@ -155,8 +155,6 @@ export const PageService = {
     data.updatedAt = new Date();
     await db.pages.update(id, data);
 
-    await db.pages.update(id, data);
-
     // Sync to backend (Upsert logic)
     // Try to update first, if that fails (e.g. 404 not found on backend), try to create
     PageSync.update(id, data).then(updatedPage => {
@@ -381,16 +379,110 @@ export const SegmentService = {
   },
 
   /**
-   * Sync all final segments for a page to backend
+   * Sync all final segments for a page to backend with version support
+   * @param {string} pageId - The page ID
+   * @param {Object} options - Sync options
+   * @param {string} [options.version='realtime'] - Transcript version to save
    */
-  async syncToBackend(pageId) {
+  async syncToBackend(pageId, { version = 'realtime' } = {}) {
     const segments = await this.getFinalByPageId(pageId);
     if (segments.length > 0) {
-      const count = await SegmentSync.saveAll(pageId, segments);
-      console.log(`Synced ${count} segments to backend for page ${pageId}`);
+      const count = await SegmentSync.saveAll(pageId, segments, version);
+      console.log(`Synced ${count} segments to backend for page ${pageId} (version: ${version})`);
       return count;
     }
     return 0;
+  },
+
+  /**
+   * Sync segments by specific source to backend
+   * @param {string} pageId - The page ID
+   * @param {string} source - Source filter: 'web_speech' | 'streaming' | 'funasr'
+   * @param {string} version - Backend version name to save as
+   */
+  async syncBySourceToBackend(pageId, source, version) {
+    const allSegments = await this.getFinalByPageId(pageId);
+    const filtered = allSegments.filter(seg => seg.source === source);
+    if (filtered.length > 0) {
+      const count = await SegmentSync.saveAll(pageId, filtered, version);
+      console.log(`Synced ${count} ${source} segments to backend as ${version}`);
+      return count;
+    }
+    return 0;
+  },
+
+  /**
+   * Get segments by transcript version from backend
+   * @param {string} pageId - The page ID
+   * @param {string} version - Transcript version ('realtime', 'final', 'fused', or null for activeVersion)
+   * @returns {Promise<{segments: Array, version: string, count: number}>}
+   */
+  async getByVersion(pageId, version = null) {
+    try {
+      const url = version
+        ? `/api/pages/${pageId}/segments?version=${version}`
+        : `/api/pages/${pageId}/segments`;
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch segments: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      // Cache in local IndexedDB
+      if (data.segments && data.segments.length > 0) {
+        for (const seg of data.segments) {
+          try {
+            await db.segments.put({
+              ...seg,
+              createdAt: new Date(seg.createdAt || Date.now())
+            });
+          } catch (e) {
+            // Ignore duplicate key errors
+          }
+        }
+      }
+
+      return data;
+    } catch (error) {
+      console.error('Failed to fetch segments by version:', error);
+      // Fallback to local data
+      const segments = await this.getFinalByPageId(pageId);
+      return {
+        segments,
+        version: version || 'realtime',
+        count: segments.length
+      };
+    }
+  },
+
+  /**
+   * Trigger AI fusion of realtime and final transcripts
+   * @param {string} pageId - The page ID
+   * @param {boolean} background - Run in background (returns task_id)
+   * @returns {Promise<{task_id?: string, status?: string, success?: boolean}>}
+   */
+  async fusionTranscripts(pageId, background = true) {
+    try {
+      const url = `/api/pages/${pageId}/fuse_transcripts`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ background })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Fusion failed: ${response.statusText}`);
+      }
+
+      const result = await response.json();
+      console.log(`🔄 Fusion ${background ? 'started' : 'completed'}:`, result);
+      return result;
+    } catch (error) {
+      console.error('Failed to trigger transcript fusion:', error);
+      return { success: false, error: error.message };
+    }
   }
 };
 
@@ -745,10 +837,41 @@ export const TodoService = {
       assignee: todoData.assignee || null,
       completed: todoData.completed || false,
       needsReminder: todoData.needs_reminder || false,
+      notes: todoData.notes || '',
+      parentId: todoData.parentId || null,
+      sortOrder: todoData.sortOrder || 0,
+      relatedIds: todoData.relatedIds || [],
       createdAt: new Date(),
       updatedAt: new Date()
     };
     await db.todos.add(todo);
+
+    // Sync to backend (non-blocking)
+    isBackendAvailable().then(available => {
+      if (!available) return;
+      fetch(`/api/pages/${pageId}/todos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: todo.id,
+          pageId: todo.pageId,
+          content: todo.content,
+          category: todo.category,
+          deadline: todo.deadline,
+          priority: todo.priority,
+          assignee: todo.assignee,
+          completed: todo.completed,
+          needsReminder: todo.needsReminder,
+          notes: todo.notes,
+          parentId: todo.parentId,
+          sortOrder: todo.sortOrder,
+          relatedIds: todo.relatedIds,
+          createdAt: todo.createdAt.toISOString(),
+          updatedAt: todo.updatedAt.toISOString()
+        })
+      }).catch(err => console.warn('Failed to sync new todo to backend:', err));
+    });
+
     return todo;
   },
 
@@ -757,20 +880,61 @@ export const TodoService = {
    */
   async addBatch(pageId, todos) {
     const now = new Date();
-    const dbTodos = todos.map(t => ({
-      id: generateUUID(),
-      pageId,
-      content: t.content,
-      category: t.category || '任务',
-      deadline: t.deadline || null,
-      priority: t.priority || '中',
-      assignee: t.assignee || null,
-      completed: t.completed || false,
-      needsReminder: t.needs_reminder || false,
-      createdAt: now,
-      updatedAt: now
-    }));
+
+    // Build temp index → real UUID mapping for parent-child relationships
+    const idMap = {};
+    const dbTodos = todos.map((t, i) => {
+      const id = generateUUID();
+      if (t._tempIdx !== undefined) {
+        idMap[t._tempIdx] = id;
+      }
+      return {
+        id,
+        pageId,
+        content: t.content,
+        category: t.category || '任务',
+        deadline: t.deadline || null,
+        priority: t.priority || '中',
+        assignee: t.assignee || null,
+        completed: t.completed || false,
+        needsReminder: t.needs_reminder || false,
+        notes: t.notes || '',
+        parentId: null, // resolved below
+        sortOrder: t.sortOrder || 0,
+        relatedIds: t.relatedIds || [],
+        createdAt: now,
+        updatedAt: now,
+        _tempParent: t._tempParent,
+      };
+    });
+
+    // Resolve _tempParent → real parentId
+    for (const todo of dbTodos) {
+      if (todo._tempParent !== undefined && idMap[todo._tempParent]) {
+        todo.parentId = idMap[todo._tempParent];
+      }
+      delete todo._tempParent;
+    }
+
     await db.todos.bulkAdd(dbTodos);
+
+    // Sync batch to backend (non-blocking)
+    isBackendAvailable().then(available => {
+      if (!available) return;
+      const todosData = dbTodos.map(t => ({
+        id: t.id, pageId: t.pageId, content: t.content,
+        category: t.category, deadline: t.deadline, priority: t.priority,
+        assignee: t.assignee, completed: t.completed, needsReminder: t.needsReminder,
+        notes: t.notes, parentId: t.parentId, sortOrder: t.sortOrder, relatedIds: t.relatedIds,
+        createdAt: t.createdAt.toISOString(), updatedAt: t.updatedAt.toISOString()
+      }));
+      fetch(`/api/pages/${pageId}/todos/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ todos: todosData })
+      }).catch(err => console.warn('Failed to sync batch todos to backend:', err));
+    });
+
     return dbTodos;
   },
 
@@ -789,6 +953,10 @@ export const TodoService = {
       assignee: t.assignee || null,
       completed: t.completed || false,
       needsReminder: t.needsReminder ?? t.needs_reminder ?? false,
+      notes: t.notes || '',
+      parentId: t.parentId || null,
+      sortOrder: t.sortOrder || 0,
+      relatedIds: t.relatedIds || [],
       createdAt: t.createdAt ? new Date(t.createdAt) : now,
       updatedAt: t.updatedAt ? new Date(t.updatedAt) : now
     }));
@@ -807,9 +975,48 @@ export const TodoService = {
   },
 
   /**
-   * Get all todos (newest first)
+   * Get all todos (newest first), syncing from backend first
    */
   async getAll() {
+    // Try to fetch from backend first for cross-device sync
+    try {
+      const backendAvailable = await isBackendAvailable();
+      if (backendAvailable) {
+        const response = await fetch('/api/todos');
+        if (response.ok) {
+          const result = await response.json();
+          if (result.success && result.todos && Array.isArray(result.todos)) {
+            // Merge backend todos into local IndexedDB
+            for (const todo of result.todos) {
+              try {
+                await db.todos.put({
+                  id: todo.id,
+                  pageId: todo.pageId,
+                  content: todo.content,
+                  category: todo.category,
+                  deadline: todo.deadline,
+                  priority: todo.priority,
+                  assignee: todo.assignee,
+                  completed: todo.completed,
+                  needsReminder: todo.needsReminder,
+                  notes: todo.notes || '',
+                  parentId: todo.parentId || null,
+                  sortOrder: todo.sortOrder || 0,
+                  relatedIds: todo.relatedIds || [],
+                  createdAt: new Date(todo.createdAt),
+                  updatedAt: new Date(todo.updatedAt)
+                });
+              } catch (e) {
+                // Ignore duplicate key errors
+              }
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to sync todos from backend:', error);
+    }
+
     return await db.todos
       .orderBy('createdAt')
       .reverse()
@@ -924,6 +1131,10 @@ export const TodoService = {
         assignee: t.assignee,
         completed: t.completed,
         needsReminder: t.needsReminder,
+        notes: t.notes || '',
+        parentId: t.parentId || null,
+        sortOrder: t.sortOrder || 0,
+        relatedIds: t.relatedIds || [],
         createdAt: t.createdAt instanceof Date ? t.createdAt.toISOString() : t.createdAt,
         updatedAt: t.updatedAt instanceof Date ? t.updatedAt.toISOString() : t.updatedAt
       }));
@@ -972,6 +1183,10 @@ export const TodoService = {
             assignee: todo.assignee,
             completed: todo.completed,
             needsReminder: todo.needsReminder,
+            notes: todo.notes || '',
+            parentId: todo.parentId || null,
+            sortOrder: todo.sortOrder || 0,
+            relatedIds: todo.relatedIds || [],
             createdAt: new Date(todo.createdAt),
             updatedAt: new Date(todo.updatedAt)
           });
@@ -984,6 +1199,86 @@ export const TodoService = {
       console.warn('Failed to sync todos from backend:', error);
     }
     return 0;
+  }
+};
+
+/**
+ * Review operations (daily review persistence)
+ */
+export const ReviewService = {
+  async save(reviewData) {
+    try {
+      const response = await fetch('/api/reviews', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reviewData)
+      });
+      if (response.ok) {
+        const result = await response.json();
+        return result.review;
+      }
+    } catch (error) {
+      console.warn('Failed to save review:', error);
+    }
+    return null;
+  },
+
+  async getByDate(date) {
+    try {
+      const response = await fetch(`/api/reviews/${date}`);
+      if (response.ok) {
+        const result = await response.json();
+        return result.review;
+      }
+    } catch (error) {
+      console.warn('Failed to get review:', error);
+    }
+    return null;
+  },
+
+  async getAll() {
+    try {
+      const response = await fetch('/api/reviews');
+      if (response.ok) {
+        const result = await response.json();
+        return result.reviews || [];
+      }
+    } catch (error) {
+      console.warn('Failed to get reviews:', error);
+    }
+    return [];
+  },
+
+  async delete(date) {
+    try {
+      const response = await fetch(`/api/reviews/${date}`, { method: 'DELETE' });
+      return response.ok;
+    } catch (error) {
+      console.warn('Failed to delete review:', error);
+      return false;
+    }
+  }
+};
+
+/**
+ * AI Todo generation from text
+ */
+export const AITodoService = {
+  async generateFromText(text, pageId = null) {
+    try {
+      const response = await fetch('/api/ai/text-to-todos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, pageId })
+      });
+      if (response.ok) {
+        const result = await response.json();
+        return result.todos || [];
+      }
+    } catch (error) {
+      console.warn('Failed to generate todos from text:', error);
+    }
+    return [];
   }
 };
 

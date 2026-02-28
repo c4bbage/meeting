@@ -1,0 +1,136 @@
+/* TranscriptVersionSwitcher Styles */
+.transcript-version-switcher {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--bg-secondary, #f8f9fa);
+    border-radius: 8px;
+    margin-bottom: 16px;
+}
+
+.version-switcher-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.version-switcher-label {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-secondary, #666);
+    white-space: nowrap;
+}
+
+.version-count {
+    font-size: 12px;
+    color: var(--text-muted, #999);
+}
+
+.version-buttons {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.version-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    background: white;
+    border: 1.5px solid #e0e0e0;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-size: 13px;
+    position: relative;
+}
+
+.version-btn:hover:not(.disabled) {
+    border-color: #4CAF50;
+    box-shadow: 0 2px 6px rgba(76, 175, 80, 0.15);
+    transform: translateY(-1px);
+}
+
+.version-btn.active {
+    background: linear-gradient(135deg, #4CAF50, #45a049);
+    border-color: #4CAF50;
+    color: white;
+    font-weight: 500;
+}
+
+.version-btn.disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    border-color: #e0e0e0;
+}
+
+.version-btn .icon {
+    font-size: 16px;
+}
+
+.version-btn .label {
+    font-weight: 500;
+}
+
+.version-btn .badge {
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    background: #ff6b6b;
+    color: white;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 10px;
+    font-weight: 600;
+}
+
+.version-btn.active .badge {
+    background: #ffd93d;
+    color: #333;
+}
+
+.version-btn .count {
+    font-size: 11px;
+    opacity: 0.8;
+    margin-left: 4px;
+}
+
+.version-info {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--text-secondary, #666);
+    font-style: italic;
+}
+
+/* Dark mode support */
+@media (prefers-color-scheme: dark) {
+    .transcript-version-switcher {
+        background: var(--bg-secondary, #2a2a2a);
+    }
+
+    .version-switcher-label {
+        color: var(--text-secondary, #aaa);
+    }
+
+    .version-btn {
+        background: #3a3a3a;
+        border-color: #555;
+        color: #ddd;
+    }
+
+    .version-btn:hover:not(.disabled) {
+        background: #444;
+        border-color: #4CAF50;
+    }
+
+    .version-btn.disabled {
+        background: #2a2a2a;
+    }
+
+    .version-info {
+        color: var(--text-secondary, #aaa);
+    }
+}

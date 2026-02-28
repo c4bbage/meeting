@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { usePageStore } from '../../store/pageStore';
 import { PageService, SegmentService, AudioService, TodoService, SpeakerDataService } from '../../services/Database';
 import { formatDateTime, formatDurationHuman, escapeHtml, downloadFile } from '../../utils/helpers';
+import TranscriptVersionSwitcher from './TranscriptVersionSwitcher';
 
 function DetailView() {
     const { id } = useParams();
@@ -30,6 +31,11 @@ function DetailView() {
     const [segments, setSegments] = useState([]);
     const [audioUrl, setAudioUrl] = useState(null);
     const [audioLoading, setAudioLoading] = useState(true);
+    const [transcriptVersion, setTranscriptVersion] = useState(null); // null = use activeVersion
+    const [versionLoading, setVersionLoading] = useState(false);
+    const [editingNotes, setEditingNotes] = useState(false);
+    const [notesText, setNotesText] = useState('');
+    const [notesSaving, setNotesSaving] = useState(false);
     const summaryLoadedFromPageRef = useRef(false);
 
     useEffect(() => {
@@ -56,9 +62,8 @@ function DetailView() {
             }
         }
 
-        // Load segments
-        const segs = await SegmentService.getFinalByPageId(id);
-        setSegments(segs);
+        // Load segments with version support
+        await loadSegmentsWithVersion(foundPage);
 
         // Load audio
         loadAudio();
@@ -69,6 +74,35 @@ function DetailView() {
         if (localTodos.length === 0 && foundPage?.todos?.length) {
             const syncedTodos = await TodoService.upsertBatch(id, foundPage.todos);
             setPageTodos(syncedTodos);
+        }
+    };
+
+    const loadSegmentsWithVersion = async (currentPage) => {
+        setVersionLoading(true);
+        try {
+            const version = transcriptVersion || currentPage?.activeVersion;
+            const data = await SegmentService.getByVersion(id, version);
+            setSegments(data.segments || []);
+        } catch (error) {
+            console.error('Failed to load segments:', error);
+            // Fallback to getFinalByPageId
+            const segs = await SegmentService.getFinalByPageId(id);
+            setSegments(segs);
+        } finally {
+            setVersionLoading(false);
+        }
+    };
+
+    const handleVersionChange = async (newVersion) => {
+        setTranscriptVersion(newVersion);
+        setVersionLoading(true);
+        try {
+            const data = await SegmentService.getByVersion(id, newVersion);
+            setSegments(data.segments || []);
+        } catch (error) {
+            console.error('Failed to load version:', error);
+        } finally {
+            setVersionLoading(false);
         }
     };
 
@@ -93,11 +127,22 @@ function DetailView() {
                 const url = URL.createObjectURL(audioBlob);
                 setAudioUrl(url);
             } else {
+                // Local not found, try backend (cross-device scenario)
+                console.log('📥 No local audio, fetching from backend...');
                 const response = await fetch(`/api/pages/${id}/audio`);
                 if (response.ok) {
                     const blob = await response.blob();
-                    const url = URL.createObjectURL(blob);
-                    setAudioUrl(url);
+                    if (blob.size > 0) {
+                        const url = URL.createObjectURL(blob);
+                        setAudioUrl(url);
+                        // Cache locally for future access
+                        try {
+                            await AudioService.save(id, blob, blob.type || 'audio/webm');
+                            console.log('✅ Audio cached locally from backend');
+                        } catch (e) {
+                            console.warn('Failed to cache audio locally:', e);
+                        }
+                    }
                 }
             }
         } catch (error) {
@@ -184,11 +229,17 @@ function DetailView() {
                 transcript += seg.text + ' ';
             });
 
+            // 如果有笔记，附加到分析请求中
+            const requestBody = { transcript: transcript.trim() };
+            if (page?.notes) {
+                requestBody.notes = page.notes;
+            }
+
             // Call API
             const response = await fetch('/api/analyze', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ transcript: transcript.trim() })
+                body: JSON.stringify(requestBody)
             });
 
             if (!response.ok) {
@@ -252,6 +303,8 @@ function DetailView() {
         }
     };
 
+    const LOW_CONFIDENCE_THRESHOLD = 0.6;
+
     const renderTranscript = () => {
         if (segments.length === 0) {
             return (
@@ -280,7 +333,16 @@ function DetailView() {
         `;
             }
 
-            html += `<span class="segment-text">${escapeHtml(seg.text)} </span>`;
+            // Add low confidence highlighting
+            const isLowConfidence = typeof seg.confidence === 'number'
+                && seg.confidence > 0
+                && seg.confidence < LOW_CONFIDENCE_THRESHOLD;
+            const confidenceClass = isLowConfidence ? ' low-confidence' : '';
+            const confidenceTitle = isLowConfidence
+                ? ` title="置信度 ${(seg.confidence * 100).toFixed(0)}%"`
+                : '';
+
+            html += `<span class="segment-text${confidenceClass}"${confidenceTitle}>${escapeHtml(seg.text)} </span>`;
             lastSpeaker = seg.speaker;
         });
 
@@ -314,7 +376,82 @@ function DetailView() {
                 <div className="page-detail-meta">
                     <span>📅 {formatDateTime(page.createdAt)}</span>
                     <span>⏱️ {formatDurationHuman(page.duration)}</span>
+                    {page.notes && <span>📝 有笔记</span>}
                 </div>
+            </div>
+
+            {/* Notes Section */}
+            <div className="notes-display">
+                <div className="notes-display-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <h4>📝 会议笔记</h4>
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                        {editingNotes ? (
+                            <>
+                                <button
+                                    className="btn btn-sm btn-primary"
+                                    disabled={notesSaving}
+                                    onClick={async () => {
+                                        setNotesSaving(true);
+                                        try {
+                                            await updatePage(id, { notes: notesText.trim() || null });
+                                            setPage(prev => ({ ...prev, notes: notesText.trim() || null }));
+                                            setEditingNotes(false);
+                                        } catch (e) {
+                                            console.error('Failed to save notes:', e);
+                                        } finally {
+                                            setNotesSaving(false);
+                                        }
+                                    }}
+                                >
+                                    {notesSaving ? '⏳ 保存中...' : '💾 保存'}
+                                </button>
+                                <button
+                                    className="btn btn-sm btn-secondary"
+                                    onClick={() => { setEditingNotes(false); setNotesText(page.notes || ''); }}
+                                >
+                                    取消
+                                </button>
+                            </>
+                        ) : (
+                            <button
+                                className="btn btn-sm btn-secondary"
+                                onClick={() => { setNotesText(page.notes || ''); setEditingNotes(true); }}
+                            >
+                                ✏️ {page.notes ? '编辑' : '添加笔记'}
+                            </button>
+                        )}
+                    </div>
+                </div>
+                {editingNotes ? (
+                    <textarea
+                        className="notes-edit-textarea"
+                        value={notesText}
+                        onChange={(e) => setNotesText(e.target.value)}
+                        placeholder="在这里记录会议笔记、想法、要点..."
+                        autoFocus
+                        style={{
+                            width: '100%',
+                            minHeight: '120px',
+                            padding: '12px',
+                            border: '1px solid var(--border-color, #333)',
+                            borderRadius: '8px',
+                            background: 'var(--bg-secondary, #1a1a2e)',
+                            color: 'var(--text-primary, #e0e0e0)',
+                            fontFamily: 'inherit',
+                            fontSize: '14px',
+                            lineHeight: '1.6',
+                            resize: 'vertical'
+                        }}
+                    />
+                ) : page.notes ? (
+                    <div className="notes-display-content" style={{ whiteSpace: 'pre-wrap' }}>
+                        {page.notes}
+                    </div>
+                ) : (
+                    <div className="text-muted" style={{ padding: '12px', fontSize: '13px' }}>
+                        暂无笔记，点击「添加笔记」记录会议要点
+                    </div>
+                )}
             </div>
 
             <div className="audio-player-section">
@@ -406,8 +543,24 @@ function DetailView() {
                     <div className="detail-panel-header">
                         <h3>📝 会议内容</h3>
                     </div>
+
+                    {/* Version Switcher */}
+                    {page && page.transcriptVersions && Object.keys(page.transcriptVersions).length > 0 && (
+                        <TranscriptVersionSwitcher
+                            page={page}
+                            currentVersion={transcriptVersion || page.activeVersion || 'realtime'}
+                            onVersionChange={handleVersionChange}
+                        />
+                    )}
+
                     <div className="detail-panel-body">
-                        {renderTranscript()}
+                        {versionLoading ? (
+                            <div className="text-center" style={{ padding: '40px' }}>
+                                <p>🔄 加载中...</p>
+                            </div>
+                        ) : (
+                            renderTranscript()
+                        )}
                     </div>
                 </div>
 

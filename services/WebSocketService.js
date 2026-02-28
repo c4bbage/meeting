@@ -27,15 +27,15 @@ export class WebSocketService {
 
         // Dynamic port handling
         // If on 3456 (dev), backend is likely on 6543
-        // If on 8000 with https, assume Caddy proxy; with http, assume static server -> 6543
+        // If on 8443 with https, assume Caddy proxy; with http, assume static server -> 6543
         // Otherwise default to 6543 for local dev servers (e.g., 5500/3000)
         let host = window.location.hostname;
         let wsPort = window.location.port;
 
         if (wsPort === '3456') {
             wsPort = '6543'; // Direct to backend
-        } else if (wsPort === '8000') {
-            wsPort = isHttps ? '8000' : '6543';
+        } else if (wsPort === '8443') {
+            wsPort = isHttps ? '8443' : '6543';
         } else if (wsPort === '6543') {
             wsPort = '6543';
         } else if (!wsPort) {
@@ -46,7 +46,7 @@ export class WebSocketService {
 
         // If no port (standard 80/443), don't append
         const portStr = wsPort ? `:${wsPort}` : '';
-        const wsPath = (isHttps || wsPort === '8000') ? '/api/ws/transcribe' : '/ws/transcribe';
+        const wsPath = (isHttps || wsPort === '8443') ? '/api/ws/transcribe' : '/ws/transcribe';
 
         return `${protocol}//${host}${portStr}${wsPath}?language=${encodeURIComponent(language)}`;
     }

@@ -69,15 +69,15 @@ This is the recommended way to run the app, using Caddy to handle HTTPS and reve
     - Auto-install Python dependencies via `uv`.
     - Start the Backend (FastAPI) on port **6543**.
     - Start the Frontend (serve) on port **3456**.
-    - Start Caddy (HTTPS Reverse Proxy) on port **8000**.
+    - Start Caddy (HTTPS Reverse Proxy) on port **8443**.
 
 4.  **Access**:
-    Open `https://<your-domain>:8000` (or `https://localhost:8000`).
+    Open `https://<your-domain>:8443` (or `https://localhost:8443`).
     > Note: You will need to accept the self-signed certificate warning.
 
 ### 3. Verification
 
-- Backend Health: `curl http://localhost:8000/health`
+- Backend Health: `curl http://localhost:8443/health`
 
 
 

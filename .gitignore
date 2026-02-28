@@ -18,3 +18,27 @@ __pycache__/
 .pytest_cache/
 FunASR
 data/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Cache and temporary files
+*.cache
+*.tmp
+*.temp
+.cache/
+tmp/
+
+# UV lock file (dependency lock)
+uv.lock
+
+# Test artifacts
+tests/__pycache__/
+tests/.pytest_cache/
+
+# Draft and temporary files
+*_draft.py
+bug.md
